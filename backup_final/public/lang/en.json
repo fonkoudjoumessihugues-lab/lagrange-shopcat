@@ -1,0 +1,121 @@
+{
+  "appName": "Lagrange Shop Manager",
+  "subtitle": "Manager Pro",
+  "login": {
+    "title": "Login",
+    "email": "Email",
+    "password": "Password",
+    "button": "Login",
+    "registerLink": "Don't have an account? Sign up",
+    "forgotPassword": "Forgot password?",
+    "errors": {
+      "invalid": "Invalid email or password",
+      "required": "Please fill in all fields"
+    }
+  },
+  "register": {
+    "title": "Sign up",
+    "fullName": "Full name",
+    "email": "Email",
+    "password": "Password",
+    "confirmPassword": "Confirm password",
+    "button": "Sign up",
+    "loginLink": "Already have an account? Login",
+    "errors": {
+      "passwordMatch": "Passwords do not match",
+      "passwordMin": "Password must be at least 6 characters"
+    }
+  },
+  "dashboard": {
+    "title": "Dashboard",
+    "salesToday": "Today's sales",
+    "salesYesterday": "Yesterday's sales",
+    "salesWeek": "Weekly sales",
+    "salesTotal": "Total sales",
+    "revenue": "Revenue",
+    "expenses": "Expenses",
+    "netProfit": "Net profit",
+    "lowStock": "Low stock",
+    "outOfStock": "Out of stock",
+    "salesChart": "Sales evolution",
+    "topProducts": "Top products",
+    "topSellers": "Top sellers"
+  },
+  "shop": {
+    "title": "Shops",
+    "new": "New shop",
+    "name": "Name",
+    "address": "Address",
+    "phone": "Phone",
+    "select": "Select",
+    "delete": "Delete"
+  },
+  "product": {
+    "title": "Products",
+    "new": "Add product",
+    "name": "Name",
+    "price": "Selling price",
+    "stock": "Stock",
+    "alertThreshold": "Alert threshold",
+    "barcode": "Barcode",
+    "restock": "Restock"
+  },
+  "sale": {
+    "title": "Sale",
+    "product": "Product",
+    "quantity": "Quantity",
+    "unitPrice": "Unit price",
+    "customer": "Customer",
+    "total": "Total",
+    "scan": "Scan barcode",
+    "calculator": "Calculator",
+    "record": "Record sale",
+    "performance": "Performance",
+    "success": "Sale recorded"
+  },
+  "expense": {
+    "title": "Expenses",
+    "new": "Add expense",
+    "category": "Category",
+    "amount": "Amount",
+    "date": "Date",
+    "description": "Description"
+  },
+  "vendor": {
+    "title": "Vendors",
+    "new": "Invite vendor",
+    "name": "Full name",
+    "email": "Email",
+    "phone": "Phone",
+    "cni": "ID card",
+    "address": "Address",
+    "commission": "Commission (%)"
+  },
+  "admin": {
+    "title": "Administration",
+    "totalUsers": "Total users",
+    "activeUsers": "Active",
+    "expiredUsers": "Expired",
+    "notifications": "Notifications",
+    "userList": "User list",
+    "extend": "Extend subscription",
+    "disable": "Disable",
+    "enable": "Enable",
+    "export": "Export"
+  },
+  "subscription": {
+    "trial": "Trial period",
+    "daysLeft": "Days left",
+    "expired": "Subscription expired",
+    "expiredMessage": "Your subscription has expired. Please contact the administrator to renew.",
+    "warning5": "Your trial ends in 5 days",
+    "warning3": "Your trial ends in 3 days",
+    "warning1": "LAST DAY! Your trial expires tomorrow"
+  },
+  "memoryGame": {
+    "title": "Memory Game",
+    "play": "Play",
+    "victory": "🎉 Congratulations! You found all pairs!",
+    "newGame": "New game"
+  }
+}

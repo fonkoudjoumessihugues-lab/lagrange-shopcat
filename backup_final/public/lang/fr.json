@@ -1,0 +1,121 @@
+{
+  "appName": "Lagrange Shop Manager",
+  "subtitle": "Manager Pro",
+  "login": {
+    "title": "Connexion",
+    "email": "Email",
+    "password": "Mot de passe",
+    "button": "Se connecter",
+    "registerLink": "Pas encore de compte ? S'inscrire",
+    "forgotPassword": "Mot de passe oublié ?",
+    "errors": {
+      "invalid": "Email ou mot de passe incorrect",
+      "required": "Veuillez remplir tous les champs"
+    }
+  },
+  "register": {
+    "title": "Inscription",
+    "fullName": "Nom complet",
+    "email": "Email",
+    "password": "Mot de passe",
+    "confirmPassword": "Confirmer le mot de passe",
+    "button": "S'inscrire",
+    "loginLink": "Déjà inscrit ? Se connecter",
+    "errors": {
+      "passwordMatch": "Les mots de passe ne correspondent pas",
+      "passwordMin": "Le mot de passe doit faire au moins 6 caractères"
+    }
+  },
+  "dashboard": {
+    "title": "Tableau de bord",
+    "salesToday": "Ventes aujourd'hui",
+    "salesYesterday": "Ventes hier",
+    "salesWeek": "Ventes (7j)",
+    "salesTotal": "Ventes totales",
+    "revenue": "Chiffre d'affaires",
+    "expenses": "Dépenses",
+    "netProfit": "Bénéfice net",
+    "lowStock": "Stock faible",
+    "outOfStock": "Ruptures",
+    "salesChart": "Évolution des ventes",
+    "topProducts": "Top produits",
+    "topSellers": "Meilleurs vendeurs"
+  },
+  "shop": {
+    "title": "Boutiques",
+    "new": "Nouvelle boutique",
+    "name": "Nom",
+    "address": "Adresse",
+    "phone": "Téléphone",
+    "select": "Sélectionner",
+    "delete": "Supprimer"
+  },
+  "product": {
+    "title": "Produits",
+    "new": "Ajouter un produit",
+    "name": "Nom",
+    "price": "Prix de vente",
+    "stock": "Stock",
+    "alertThreshold": "Seuil d'alerte",
+    "barcode": "Code-barres",
+    "restock": "Réapprovisionner"
+  },
+  "sale": {
+    "title": "Vente",
+    "product": "Produit",
+    "quantity": "Quantité",
+    "unitPrice": "Prix unitaire",
+    "customer": "Client",
+    "total": "Total",
+    "scan": "Scanner un code-barres",
+    "calculator": "Calculatrice",
+    "record": "Vendre",
+    "performance": "Performance",
+    "success": "Vente enregistrée"
+  },
+  "expense": {
+    "title": "Dépenses",
+    "new": "Ajouter une dépense",
+    "category": "Catégorie",
+    "amount": "Montant",
+    "date": "Date",
+    "description": "Description"
+  },
+  "vendor": {
+    "title": "Vendeurs",
+    "new": "Inviter un vendeur",
+    "name": "Nom complet",
+    "email": "Email",
+    "phone": "Téléphone",
+    "cni": "CNI",
+    "address": "Adresse",
+    "commission": "Commission (%)"
+  },
+  "admin": {
+    "title": "Administration",
+    "totalUsers": "Total utilisateurs",
+    "activeUsers": "Actifs",
+    "expiredUsers": "Expirés",
+    "notifications": "Notifications",
+    "userList": "Liste des utilisateurs",
+    "extend": "Prolonger l'abonnement",
+    "disable": "Désactiver",
+    "enable": "Réactiver",
+    "export": "Exporter"
+  },
+  "subscription": {
+    "trial": "Période d'essai",
+    "daysLeft": "Jours restants",
+    "expired": "Abonnement expiré",
+    "expiredMessage": "Votre abonnement a expiré. Contactez l'administrateur pour le renouveler.",
+    "warning5": "Votre essai se termine dans 5 jours",
+    "warning3": "Votre essai se termine dans 3 jours",
+    "warning1": "DERNIER JOUR ! Votre essai expire demain"
+  },
+  "memoryGame": {
+    "title": "Memory Game",
+    "play": "Jouer",
+    "victory": "🎉 Félicitations ! Vous avez trouvé toutes les paires !",
+    "newGame": "Nouvelle partie"
+  }
+}
