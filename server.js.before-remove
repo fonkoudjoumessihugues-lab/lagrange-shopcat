@@ -1,0 +1,460 @@
+// ========== IA ==========
+app.post('/api/ai/ask', auth, (req, res) => {
+  try {
+    const { question, shopId } = req.body;
+    const lower = question.toLowerCase();
+    const userDir = getUserDataDir(req.userId);
+    const sales = readJSON(path.join(userDir, 'sales.json'), []);
+    const products = readJSON(path.join(userDir, 'products.json'), []);
+    const expenses = readJSON(path.join(userDir, 'expenses.json'), []);
+    const shopSales = sales.filter(s => s.shopId === shopId && !s.cancelled);
+    const shopProducts = products.filter(p => p.shopId === shopId);
+    const shopExpenses = expenses.filter(e => e.shopId === shopId);
+    let answer = '';
+    if ((lower.includes('aujourd') || lower.includes('jour')) && (lower.includes('vente') || lower.includes('vendu'))) {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const yesterday = new Date(today);
+      yesterday.setDate(today.getDate() - 1);
+      const todayCount = shopSales.filter(s => new Date(s.date) >= today).length;
+      const yesterdayCount = shopSales.filter(s => new Date(s.date) >= yesterday && new Date(s.date) < today).length;
+      answer = "Aujourd'hui : " + todayCount + " vente(s). Hier : " + yesterdayCount + " vente(s).";
+    } else if (lower.includes('hier') && (lower.includes('vente') || lower.includes('vendu'))) {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const yesterday = new Date(today);
+      yesterday.setDate(today.getDate() - 1);
+      const count = shopSales.filter(s => new Date(s.date) >= yesterday && new Date(s.date) < today).length;
+      answer = "Hier : " + count + " vente(s).";
+    } else if (lower.includes('produit') && lower.includes('plus vendu')) {
+      const productQty = {};
+      shopSales.forEach(s => productQty[s.productId] = (productQty[s.productId] || 0) + s.quantity);
+      if (Object.keys(productQty).length === 0) answer = 'Aucune vente enregistree.';
+      else {
+        const topId = Object.keys(productQty).reduce((a, b) => productQty[a] > productQty[b] ? a : b);
+        const product = shopProducts.find(p => p.id === parseInt(topId));
+        answer = "Produit le plus vendu : " + (product?.name || 'Inconnu') + " (" + productQty[topId] + " unites).";
+      }
+    } else if (lower.includes('meilleur vendeur') || lower.includes('top vendeur')) {
+      const sellerSalesMap = {};
+      shopSales.forEach(s => sellerSalesMap[s.sellerId] = (sellerSalesMap[s.sellerId] || 0) + s.total);
+      if (Object.keys(sellerSalesMap).length === 0) answer = 'Aucune vente enregistree.';
+      else {
+        const topId = Object.keys(sellerSalesMap).reduce((a, b) => sellerSalesMap[a] > sellerSalesMap[b] ? a : b);
+        const seller = users.find(u => u.id === parseInt(topId));
+        answer = "Meilleur vendeur : " + (seller?.fullName || 'Inconnu') + " (" + sellerSalesMap[topId].toLocaleString() + " FCFA).";
+      }
+    } else if (lower.includes('commander') || lower.includes('stock') || lower.includes('reapprovisionner')) {
+      const low = shopProducts.filter(p => p.quantity <= p.alertThreshold);
+      if (low.length === 0) answer = 'Stock suffisant pour tous les produits.';
+      else answer = "Produits a reapprovisionner : " + low.map(p => p.name + " (" + p.quantity + " restants)").join(', ');
+    } else if (lower.includes('depense') || lower.includes('depenses')) {
+      const totalExpenses = shopExpenses.reduce((sum, e) => sum + e.amount, 0);
+      answer = "Total des depenses : " + totalExpenses.toLocaleString() + " FCFA.";
+    } else if (lower.includes('benefice') || lower.includes('profit')) {
+      const revenue = shopSales.reduce((sum, s) => sum + s.total, 0);
+      const totalExpenses = shopExpenses.reduce((sum, e) => sum + e.amount, 0);
+      const profit = revenue - totalExpenses;
+      answer = "Benefice net : " + profit.toLocaleString() + " FCFA (CA: " + revenue.toLocaleString() + " FCFA - Depenses: " + totalExpenses.toLocaleString() + " FCFA)";
+    } else if (lower.includes('prediction') || lower.includes('demain')) {
+      if (shopSales.length < 7) answer = 'Pas assez de donnees (minimum 7 jours).';
+      else {
+        const dailyTotals = {};
+        shopSales.forEach(sale => {
+          const date = new Date(sale.date).toISOString().split('T')[0];
+          dailyTotals[date] = (dailyTotals[date] || 0) + sale.total;
+        });
+        const values = Object.values(dailyTotals);
+        const last7Avg = values.slice(-7).reduce((a, b) => a + b, 0) / 7;
+        const prediction = Math.round(last7Avg * 1.05);
+        answer = "Prediction demain : ~" + prediction.toLocaleString() + " FCFA.";
+      }
+    } else {
+      answer = "Je reponds aux questions sur : Ventes (aujourd'hui, hier), Produit plus vendu, Meilleur vendeur, Stock, Depenses, Benefice, Prediction. Ex: 'Combien de ventes aujourd'hui ?'";
+    }
+    res.json({ answer });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+  try {
+    const { question, shopId } = req.body;
+    const lower = question.toLowerCase();
+    const userDir = getUserDataDir(req.userId);
+    const sales = readJSON(path.join(userDir, 'sales.json'), []);
+    const products = readJSON(path.join(userDir, 'products.json'), []);
+    const expenses = readJSON(path.join(userDir, 'expenses.json'), []);
+    const shops = readJSON(path.join(userDir, 'shops.json'), []);
+    const shopSales = sales.filter(s => s.shopId === parseInt(shopId) && !s.cancelled);
+    const shopProducts = products.filter(p => p.shopId === parseInt(shopId));
+    const shopExpenses = expenses.filter(e => e.shopId === parseInt(shopId));
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const startOfWeek = new Date(now);
+    startOfWeek.setDate(now.getDate() - 7);
+    const totalSales = shopSales.length;
+    const totalRevenue = shopSales.reduce((sum, s) => sum + s.total, 0);
+    const todaySales = shopSales.filter(s => new Date(s.date) >= today).length;
+    const yesterdaySales = shopSales.filter(s => {
+      const d = new Date(s.date);
+      return d >= new Date(today.getTime() - 86400000) && d < today;
+    }).length;
+    const monthRevenue = shopSales.filter(s => new Date(s.date) >= startOfMonth).reduce((sum, s) => sum + s.total, 0);
+    const monthSales = shopSales.filter(s => new Date(s.date) >= startOfMonth).length;
+    const weekSales = shopSales.filter(s => new Date(s.date) >= startOfWeek).length;
+    const avgSale = totalSales > 0 ? totalRevenue / totalSales : 0;
+    const totalExpenses = shopExpenses.reduce((sum, e) => sum + e.amount, 0);
+    const netProfit = totalRevenue - totalExpenses;
+    const productQty = {};
+    shopSales.forEach(s => productQty[s.productId] = (productQty[s.productId] || 0) + s.quantity);
+    let topProduct = null;
+    if (Object.keys(productQty).length > 0) {
+      const topId = Object.keys(productQty).reduce((a, b) => productQty[a] > productQty[b] ? a : b);
+      topProduct = shopProducts.find(p => p.id === parseInt(topId));
+    }
+    const sellerSales = {};
+    shopSales.forEach(s => sellerSales[s.sellerId] = (sellerSales[s.sellerId] || 0) + s.total);
+    let topSeller = null;
+    if (Object.keys(sellerSales).length > 0) {
+      const topId = Object.keys(sellerSales).reduce((a, b) => sellerSales[a] > sellerSales[b] ? a : b);
+      topSeller = users.find(u => u.id === parseInt(topId));
+    }
+    let answer = '';
+    // VENTES
+    if (lower.includes('vente aujourd') || lower.includes('ventes aujourd')) {
+      answer = "Aujourd'hui : " + todaySales + " vente(s). Hier : " + yesterdaySales + " vente(s).";
+    } else if (lower.includes('chiffre d affaires') || lower.includes('ca du mois')) {
+      answer = "CA du mois : " + monthRevenue.toLocaleString() + " FCFA (" + monthSales + " ventes).";
+    } else if (lower.includes('panier moyen')) {
+      answer = "Panier moyen : " + avgSale.toLocaleString() + " FCFA.";
+    } else if (lower.includes('meilleur vendeur') || lower.includes('vendeur du mois')) {
+      answer = topSeller ? "Meilleur vendeur : " + topSeller.fullName + " avec " + sellerSales[topSeller.id].toLocaleString() + " FCFA." : "Aucune donnee.";
+    } else if (lower.includes('produit le plus vendu') || lower.includes('best-seller')) {
+      answer = topProduct ? "Produit le plus vendu : " + topProduct.name + " (" + productQty[topProduct.id] + " unites)." : "Aucune donnee.";
+    } else if (lower.includes('rupture de stock')) {
+      const out = shopProducts.filter(p => p.quantity === 0);
+      answer = out.length === 0 ? "Aucun produit en rupture." : "Ruptures : " + out.map(p => p.name).join(', ');
+    } else if (lower.includes('stock faible')) {
+      const low = shopProducts.filter(p => p.quantity > 0 && p.quantity <= (p.alertThreshold || 5));
+      answer = low.length === 0 ? "Aucun stock faible." : "Stock faible : " + low.map(p => p.name + " (" + p.quantity + ")").join(', ');
+    } else if (lower.includes('benefice net du mois')) {
+      const monthExpenses = shopExpenses.filter(e => new Date(e.date) >= startOfMonth).reduce((sum, e) => sum + e.amount, 0);
+      const profit = monthRevenue - monthExpenses;
+      answer = "Benefice net du mois : " + profit.toLocaleString() + " FCFA.";
+    } else if (lower.includes('depenses du mois')) {
+      const monthExpenses = shopExpenses.filter(e => new Date(e.date) >= startOfMonth).reduce((sum, e) => sum + e.amount, 0);
+      answer = "Depenses du mois : " + monthExpenses.toLocaleString() + " FCFA.";
+    } else if (lower.includes('meilleurs clients')) {
+      const clientSpending = {};
+      shopSales.forEach(s => clientSpending[s.customerName] = (clientSpending[s.customerName] || 0) + s.total);
+      const top = Object.entries(clientSpending).sort((a, b) => b[1] - a[1]).slice(0, 5);
+      answer = top.length === 0 ? "Aucun client." : "Meilleurs clients : " + top.map(([name, total]) => name + " (" + total.toLocaleString() + " FCFA)").join(' | ');
+    } else if (lower.includes('prediction pour demain')) {
+      if (shopSales.length < 7) answer = "Pas assez de donnees pour predire (minimum 7 jours).";
+      else {
+        const dailyTotals = {};
+        shopSales.forEach(s => {
+          const date = new Date(s.date).toISOString().split('T')[0];
+          dailyTotals[date] = (dailyTotals[date] || 0) + s.total;
+        });
+        const values = Object.values(dailyTotals);
+        const last7Avg = values.slice(-7).reduce((a, b) => a + b, 0) / 7;
+        const prediction = Math.round(last7Avg * 1.05);
+        answer = "Prediction pour demain : ~" + prediction.toLocaleString() + " FCFA.";
+      }
+    } else if (lower.includes('sante financiere')) {
+      const metrics = [
+        totalSales > 10 ? 20 : totalSales > 5 ? 10 : 0,
+        totalRevenue > 1000000 ? 20 : totalRevenue > 500000 ? 10 : 0,
+        shopProducts.length > 20 ? 20 : shopProducts.length > 10 ? 10 : 0,
+        netProfit > 0 ? 20 : netProfit > -100000 ? 10 : 0,
+        weekSales > 5 ? 20 : weekSales > 2 ? 10 : 0
+      ];
+      const score = metrics.reduce((a, b) => a + b, 0);
+      const status = score >= 80 ? "Excellent" : score >= 60 ? "Bon" : score >= 40 ? "Moyen" : "Critique";
+      answer = "Score de sante : " + score + "/100 - " + status + ".";
+    } else {
+    }
+    res.json({ answer });
+  } catch (err) {
+    console.error('Erreur IA:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ========== IA ==========
+app.post('/api/ai/ask', auth, (req, res) => {
+  try {
+    const { question, shopId } = req.body;
+    const lower = question.toLowerCase();
+    const userDir = getUserDataDir(req.userId);
+    const sales = readJSON(path.join(userDir, 'sales.json'), []);
+    const products = readJSON(path.join(userDir, 'products.json'), []);
+    const expenses = readJSON(path.join(userDir, 'expenses.json'), []);
+
+    const shopSales = sales.filter(s => s.shopId === shopId && !s.cancelled);
+    const shopProducts = products.filter(p => p.shopId === shopId);
+    const shopExpenses = expenses.filter(e => e.shopId === shopId);
+
+    let answer = '';
+
+    if ((lower.includes('aujourd') || lower.includes('jour')) && (lower.includes('vente') || lower.includes('vendu'))) {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const yesterday = new Date(today);
+      yesterday.setDate(today.getDate() - 1);
+      const todayCount = shopSales.filter(s => new Date(s.date) >= today).length;
+      const yesterdayCount = shopSales.filter(s => new Date(s.date) >= yesterday && new Date(s.date) < today).length;
+      answer = "Aujourd'hui : " + todayCount + " vente(s). Hier : " + yesterdayCount + " vente(s).";
+    } else if (lower.includes('hier') && (lower.includes('vente') || lower.includes('vendu'))) {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const yesterday = new Date(today);
+      yesterday.setDate(today.getDate() - 1);
+      const count = shopSales.filter(s => new Date(s.date) >= yesterday && new Date(s.date) < today).length;
+      answer = "Hier : " + count + " vente(s).";
+    } else if (lower.includes('produit') && lower.includes('plus vendu')) {
+      const productQty = {};
+      shopSales.forEach(s => productQty[s.productId] = (productQty[s.productId] || 0) + s.quantity);
+      if (Object.keys(productQty).length === 0) answer = 'Aucune vente enregistree.';
+      else {
+        const topId = Object.keys(productQty).reduce((a, b) => productQty[a] > productQty[b] ? a : b);
+        const product = shopProducts.find(p => p.id === parseInt(topId));
+        answer = "Produit le plus vendu : " + (product?.name || 'Inconnu') + " (" + productQty[topId] + " unites).";
+      }
+    } else if (lower.includes('meilleur vendeur') || lower.includes('top vendeur')) {
+      const sellerSalesMap = {};
+      shopSales.forEach(s => sellerSalesMap[s.sellerId] = (sellerSalesMap[s.sellerId] || 0) + s.total);
+      if (Object.keys(sellerSalesMap).length === 0) answer = 'Aucune vente enregistree.';
+      else {
+        const topId = Object.keys(sellerSalesMap).reduce((a, b) => sellerSalesMap[a] > sellerSalesMap[b] ? a : b);
+        const seller = users.find(u => u.id === parseInt(topId));
+        answer = "Meilleur vendeur : " + (seller?.fullName || 'Inconnu') + " (" + sellerSalesMap[topId].toLocaleString() + " FCFA).";
+      }
+    } else if (lower.includes('commander') || lower.includes('stock') || lower.includes('reapprovisionner')) {
+      const low = shopProducts.filter(p => p.quantity <= p.alertThreshold);
+      if (low.length === 0) answer = 'Stock suffisant pour tous les produits.';
+      else answer = "Produits a reapprovisionner : " + low.map(p => p.name + " (" + p.quantity + " restants)").join(', ');
+    } else if (lower.includes('depense') || lower.includes('depenses')) {
+      const totalExpenses = shopExpenses.reduce((sum, e) => sum + e.amount, 0);
+      answer = "Total des depenses : " + totalExpenses.toLocaleString() + " FCFA.";
+    } else if (lower.includes('benefice') || lower.includes('profit')) {
+      const revenue = shopSales.reduce((sum, s) => sum + s.total, 0);
+      const totalExpenses = shopExpenses.reduce((sum, e) => sum + e.amount, 0);
+      const profit = revenue - totalExpenses;
+      answer = "Benefice net : " + profit.toLocaleString() + " FCFA (CA: " + revenue.toLocaleString() + " FCFA - Depenses: " + totalExpenses.toLocaleString() + " FCFA)";
+    } else if (lower.includes('prediction') || lower.includes('demain')) {
+      if (shopSales.length < 7) answer = 'Pas assez de donnees (minimum 7 jours).';
+      else {
+        const dailyTotals = {};
+        shopSales.forEach(sale => {
+          const date = new Date(sale.date).toISOString().split('T')[0];
+          dailyTotals[date] = (dailyTotals[date] || 0) + sale.total;
+        });
+        const values = Object.values(dailyTotals);
+        const last7Avg = values.slice(-7).reduce((a, b) => a + b, 0) / 7;
+        const prediction = Math.round(last7Avg * 1.05);
+        answer = "Prediction demain : ~" + prediction.toLocaleString() + " FCFA.";
+      }
+    } else {
+      answer = "Je reponds aux questions sur : Ventes (aujourd'hui, hier), Produit plus vendu, Meilleur vendeur, Stock, Depenses, Benefice, Prediction. Ex: 'Combien de ventes aujourd'hui ?'";
+    }
+    res.json({ answer });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+// ========== CONFIGURATION FACTURE ==========
+app.get('/api/invoice-config', auth, (req, res) => {
+  res.json(adminConfig);
+});
+app.post('/api/invoice-config', auth, (req, res) => {
+  try {
+    adminConfig = { ...adminConfig, ...req.body };
+    writeJSON(path.join(DATA_DIR, 'config.json'), adminConfig);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+// ========== ALERTES ==========
+app.get('/api/alerts', auth, (req, res) => {
+  try {
+    const { shopId } = req.query;
+    const userDir = getUserDataDir(req.userId);
+    const alerts = readJSON(path.join(userDir, 'alerts.json'), []);
+    res.json(alerts.filter(a => a.shopId === parseInt(shopId)).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+app.put('/api/alerts/:id/read', auth, (req, res) => {
+  try {
+    const userDir = getUserDataDir(req.userId);
+    let alerts = readJSON(path.join(userDir, 'alerts.json'), []);
+    const index = alerts.findIndex(a => a.id === parseInt(req.params.id));
+    if (index !== -1) alerts[index].read = true;
+    writeJSON(path.join(userDir, 'alerts.json'), alerts);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+// ========== EXPORT ==========
+app.get('/api/export/sales', auth, async (req, res) => {
+  try {
+    const { shopId, format = 'csv' } = req.query;
+    const userDir = getUserDataDir(req.userId);
+    const sales = readJSON(path.join(userDir, 'sales.json'), []);
+    const shopSales = sales.filter(s => s.shopId === parseInt(shopId) && !s.cancelled);
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Ventes');
+    worksheet.columns = [
+      { header: 'Date', key: 'date', width: 20 },
+      { header: 'Produit', key: 'product', width: 20 },
+      { header: 'Client', key: 'customer', width: 20 },
+      { header: 'Vendeur', key: 'seller', width: 20 },
+      { header: 'Quantite', key: 'quantity', width: 10 },
+      { header: 'Prix unitaire', key: 'unitPrice', width: 15 },
+      { header: 'Total', key: 'total', width: 15 },
+      { header: 'Moyen paiement', key: 'paymentMethod', width: 15 }
+    ];
+    shopSales.forEach(s => worksheet.addRow({
+      date: new Date(s.date).toLocaleDateString('fr-FR'),
+      product: s.productName,
+      customer: s.customerName,
+      seller: s.sellerName,
+      quantity: s.quantity,
+      unitPrice: s.unitPrice,
+      total: s.total,
+      paymentMethod: s.paymentMethod || 'cash'
+    }));
+    if (format === 'csv') {
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename=ventes.csv');
+      await workbook.csv.write(res);
+    } else {
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', 'attachment; filename=ventes.xlsx');
+      await workbook.xlsx.write(res);
+    }
+    res.end();
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+app.get('/api/export/products', auth, async (req, res) => {
+  try {
+    const { shopId, format = 'csv' } = req.query;
+    const userDir = getUserDataDir(req.userId);
+    const products = readJSON(path.join(userDir, 'products.json'), []);
+    const shopProducts = products.filter(p => p.shopId === parseInt(shopId));
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Produits');
+    worksheet.columns = [
+      { header: 'Nom', key: 'name', width: 20 },
+      { header: 'Stock', key: 'quantity', width: 10 },
+      { header: 'Prix vente', key: 'sellingPrice', width: 15 },
+      { header: 'Seuil alerte', key: 'alertThreshold', width: 12 },
+      { header: 'Date péremption', key: 'expiryDate', width: 15 }
+    ];
+    shopProducts.forEach(p => worksheet.addRow({
+      name: p.name,
+      quantity: p.quantity,
+      sellingPrice: p.sellingPrice,
+      alertThreshold: p.alertThreshold,
+      expiryDate: p.expiryDate || '-'
+    }));
+    if (format === 'csv') {
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename=produits.csv');
+      await workbook.csv.write(res);
+    } else {
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', 'attachment; filename=produits.xlsx');
+      await workbook.xlsx.write(res);
+    }
+    res.end();
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+app.get('/api/export/expenses', auth, async (req, res) => {
+  try {
+    const { shopId, format = 'csv' } = req.query;
+    const userDir = getUserDataDir(req.userId);
+    const expenses = readJSON(path.join(userDir, 'expenses.json'), []);
+    const shopExpenses = expenses.filter(e => e.shopId === parseInt(shopId));
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Depenses');
+    worksheet.columns = [
+      { header: 'Date', key: 'date', width: 20 },
+      { header: 'Categorie', key: 'category', width: 20 },
+      { header: 'Montant', key: 'amount', width: 15 },
+      { header: 'Description', key: 'description', width: 30 }
+    ];
+    shopExpenses.forEach(e => worksheet.addRow({
+      date: new Date(e.date).toLocaleDateString('fr-FR'),
+      category: e.category,
+      amount: e.amount,
+      description: e.description
+    }));
+    if (format === 'csv') {
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename=depenses.csv');
+      await workbook.csv.write(res);
+    } else {
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', 'attachment; filename=depenses.xlsx');
+      await workbook.xlsx.write(res);
+    }
+    res.end();
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+// ========== LOGS ==========
+app.get('/api/logs', auth, (req, res) => {
+  try {
+    const { limit = 100 } = req.query;
+    res.json(logs.slice(-parseInt(limit)));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+// ========== SANTÉ ==========
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'OK',
+    users: users.length,
+    logs: logs.length,
+    notifications: notifications.length,
+    uptime: process.uptime(),
+    memory: process.memoryUsage()
+  });
+});
+// ========== EXPORT ZIP DES DONNÉES UTILISATEUR ==========
+app.get('/api/export/user-data', auth, (req, res) => {
+  try {
+    const userDir = getUserDataDir(req.userId);
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename=donnees_${req.userId}_${new Date().toISOString().split('T')[0]}.zip`);
+    archive.pipe(res);
+    archive.directory(userDir, false);
+    archive.finalize();
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+// ========== DÉMARRAGE ==========
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`\n🚀 Lagrange Shop Manager v3.0`);
+  console.log(`📍 http://localhost:${PORT}`);
+  console.log(`🔐 Connexion : http://localhost:${PORT}/auth.html`);
+  console.log(`📁 Données admin : ${DATA_DIR}`);
+  console.log(`📁 Données utilisateur : ${USER_DATA_ROOT}`);
+  console.log(`✅ Serveur prêt !\n`);
+});

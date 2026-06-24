@@ -1,1903 +1,1227 @@
-require('dotenv').config();
 const express = require('express');
-const cors = require('cors');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const PDFDocument = require('pdfkit');
-const ExcelJS = require('exceljs');
-const compression = require('compression');
-const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
-const { body, validationResult } = require('express-validator');
-const archiver = require('archiver');
-const cron = require('node-cron');
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const ExcelJS = require('exceljs');
+const archiver = require('archiver');
+const PDFDocument = require('pdfkit');
 
 const app = express();
-
-// ========== MIDDLEWARES ==========
-app.use(compression());
-app.use(helmet({
-  contentSecurityPolicy: false,
-  crossOriginEmbedderPolicy: false
-}));
-app.use(cors());
 app.use(express.json({ limit: '50mb' }));
-app.use(express.static('public', { maxAge: '1d' }));
 
-// ========== RATE LIMITING ==========
-const limiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 100,
-  message: { error: 'Trop de requêtes, veuillez réessayer plus tard.' },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-app.use('/api/', limiter);
-
-// ========== CONSTANTES ==========
+// ========== CONFIGURATION ==========
 const DATA_DIR = path.join(__dirname, 'data');
-const BACKUP_DIR = path.join(DATA_DIR, 'backups');
-const USER_DATA_ROOT = process.env.USER_DATA_DIR || path.join(os.homedir(), '.lagrange-shop');
+const USER_DATA_ROOT = path.join(__dirname, 'user-data');
 const JWT_SECRET = process.env.JWT_SECRET || 'lagrange_super_secret_key_change_me';
-const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@lagrange.com';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'Admin123!';
-const TRIAL_DAYS = 15;
-const NOTIFICATION_DAYS = [5, 3, 1];
-const WHATSAPP_NUMBER = process.env.WHATSAPP_NUMBER || '237656793804';
 
-// ========== CRÉATION DES DOSSIERS ==========
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
-if (!fs.existsSync(USER_DATA_ROOT)) fs.mkdirSync(USER_DATA_ROOT, { recursive: true });
-
-// ========== FONCTIONS DE STOCKAGE ==========
-function readJSON(filePath, defaults = []) {
-  if (!fs.existsSync(filePath)) return defaults;
-  try {
-    const data = fs.readFileSync(filePath, 'utf8');
-    return JSON.parse(data);
-  } catch { return defaults; }
+// ========== FONCTIONS UTILITAIRES ==========
+function ensureDir(dir) {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
-function writeJSON(filePath, data) {
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+function readJSON(file, defaultVal = {}) {
+    try {
+        if (fs.existsSync(file)) {
+            return JSON.parse(fs.readFileSync(file, 'utf8'));
+        }
+        return defaultVal;
+    } catch (e) {
+        console.error('Erreur lecture JSON:', file, e);
+        return defaultVal;
+    }
+}
+
+function writeJSON(file, data) {
+    ensureDir(path.dirname(file));
+    fs.writeFileSync(file, JSON.stringify(data, null, 2));
 }
 
 function getUserDataDir(userId) {
-  const dir = path.join(USER_DATA_ROOT, String(userId));
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  return dir;
+    const dir = path.join(USER_DATA_ROOT, String(userId));
+    ensureDir(dir);
+    return dir;
 }
 
-function getUserFile(userId, filename) {
-  return path.join(getUserDataDir(userId), filename);
+function generateId() {
+    return Date.now() + Math.floor(Math.random() * 1000);
 }
 
-// ========== DONNÉES ADMIN ==========
-let users = readJSON(path.join(DATA_DIR, 'users.json'), []);
-let logs = readJSON(path.join(DATA_DIR, 'logs.json'), []);
-let notifications = readJSON(path.join(DATA_DIR, 'notifications.json'), []);
-let adminConfig = readJSON(path.join(DATA_DIR, 'config.json'), {
-  companyName: 'Lagrange Shop',
-  companyAddress: '',
-  companyPhone: '',
-  companyEmail: '',
-  taxRate: 0
-});
+// ========== UTILISATEURS ==========
+let users = [];
+const usersFile = path.join(DATA_DIR, 'users.json');
 
-// ========== CRÉATION DU COMPTE ADMIN ==========
-const adminExists = users.find(u => u.email === ADMIN_EMAIL);
-if (!adminExists) {
-  const hashedPassword = bcrypt.hashSync(ADMIN_PASSWORD, 10);
-  users.push({
-    id: 1,
-    fullName: 'Administrateur',
-    email: ADMIN_EMAIL,
-    password: hashedPassword,
-    role: 'super_admin',
-    subscription: {
-      status: 'active',
-      startDate: new Date().toISOString(),
-      endDate: null,
-      plan: 'admin'
-    },
-    shopId: null,
-    phone: null,
-    cni: null,
-    address: null,
-    commission: 0,
-    createdAt: new Date().toISOString()
-  });
-  writeJSON(path.join(DATA_DIR, 'users.json'), users);
-  addNotification('Bienvenue !', 'Compte admin créé avec succès.', 'info');
-}
-
-// ========== FONCTIONS DE SAUVEGARDE ==========
-function saveAll() {
-  writeJSON(path.join(DATA_DIR, 'users.json'), users);
-  writeJSON(path.join(DATA_DIR, 'logs.json'), logs);
-  writeJSON(path.join(DATA_DIR, 'notifications.json'), notifications);
-  writeJSON(path.join(DATA_DIR, 'config.json'), adminConfig);
-}
-
-function addLog(action, details = {}) {
-  const log = {
-    id: logs.length + 1,
-    timestamp: new Date().toISOString(),
-    action,
-    ...details,
-    ip: details.ip || 'unknown'
-  };
-  logs.push(log);
-  if (logs.length > 10000) logs.shift();
-  writeJSON(path.join(DATA_DIR, 'logs.json'), logs);
-}
-
-function addNotification(title, message, type = 'info', userId = null) {
-  const notif = {
-    id: notifications.length + 1,
-    title,
-    message,
-    type,
-    userId,
-    read: false,
-    createdAt: new Date().toISOString()
-  };
-  notifications.push(notif);
-  if (notifications.length > 500) notifications.shift();
-  writeJSON(path.join(DATA_DIR, 'notifications.json'), notifications);
-}
-
-// ========== SAUVEGARDE AUTOMATIQUE ==========
-cron.schedule('0 0 * * *', () => {
-  const backupName = `backup_${new Date().toISOString().split('T')[0]}.json`;
-  const backupPath = path.join(BACKUP_DIR, backupName);
-  const allData = { users, logs, notifications, adminConfig };
-  writeJSON(backupPath, allData);
-  addLog('backup_auto', { backupName });
-  console.log(`✅ Sauvegarde automatique effectuée : ${backupName}`);
-});
-
-// ========== VÉRIFICATION DES ABONNEMENTS ==========
-cron.schedule('0 * * * *', () => {
-  const now = new Date();
-  users.forEach(user => {
-    if (user.role === 'super_admin' || user.role === 'admin') return;
-    if (user.subscription.status === 'expired') return;
-    const endDate = new Date(user.subscription.endDate);
-    const diffDays = Math.ceil((endDate - now) / (1000 * 60 * 60 * 24));
-    
-    if (NOTIFICATION_DAYS.includes(diffDays)) {
-      addNotification(
-        `⚠️ Abonnement bientôt expiré`,
-        `${user.fullName}, votre essai se termine dans ${diffDays} jour${diffDays > 1 ? 's' : ''}.`,
-        'warning',
-        user.id
-      );
-    }
-    
-    if (diffDays <= 0 && user.subscription.status === 'active') {
-      user.subscription.status = 'expired';
-      addNotification(
-        `❌ Abonnement expiré`,
-        `L'abonnement de ${user.fullName} a expiré.`,
-        'danger',
-        user.id
-      );
-      saveAll();
-    }
-  });
-});
-
-// ========== MIDDLEWARE DE VÉRIFICATION D'ABONNEMENT ==========
-function checkSubscription(req, res, next) {
-  const user = users.find(u => u.id === req.userId);
-  if (!user) return res.status(401).json({ error: 'Utilisateur non trouvé' });
-  if (user.role === 'super_admin' || user.role === 'admin') return next();
-  
-  if (user.subscription.status === 'expired') {
-    return res.status(403).json({ 
-      error: 'abonnement_expire',
-      message: 'Votre abonnement a expiré. Contactez l\'administrateur pour le renouveler.'
-    });
-  }
-  next();
-}
-
-// ========== AUTH ==========
-const auth = (req, res, next) => {
-  const token = req.headers.authorization?.split(' ')[1];
-  if (!token) return res.status(401).json({ error: 'Token manquant' });
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.userId = decoded.id;
-    req.userRole = decoded.role;
-    next();
-  } catch {
-    res.status(401).json({ error: 'Token invalide' });
-  }
-};
-
-const authorize = (...roles) => (req, res, next) => {
-  if (!roles.includes(req.userRole)) return res.status(403).json({ error: 'Permission refusee' });
-  next();
-};
-
-// ========== ROUTES AUTH ==========
-app.post('/api/auth/register', [
-  body('fullName').notEmpty().withMessage('Nom requis'),
-  body('email').isEmail().withMessage('Email invalide'),
-  body('password').isLength({ min: 6 }).withMessage('Mot de passe minimum 6 caractères')
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
-
-  try {
-    const { fullName, email, password } = req.body;
-    if (users.find(u => u.email === email)) {
-      return res.status(400).json({ error: 'Email déjà utilisé' });
-    }
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const now = new Date();
-    const endDate = new Date(now);
-    endDate.setDate(now.getDate() + TRIAL_DAYS);
-
-    const newUser = {
-      id: users.length + 1,
-      fullName,
-      email,
-      password: hashedPassword,
-      role: 'user',
-      subscription: {
-        status: 'active',
-        startDate: now.toISOString(),
-        endDate: endDate.toISOString(),
-        plan: 'trial'
-      },
-      shopId: null,
-      phone: null,
-      cni: null,
-      address: null,
-      commission: 0,
-      createdAt: now.toISOString()
-    };
-    users.push(newUser);
-    saveAll();
-
-    addNotification(
-      `👤 Nouvel utilisateur`,
-      `${fullName} (${email}) vient de s'inscrire.`,
-      'success'
-    );
-    addLog('user_register', { userId: newUser.id, email, ip: req.ip });
-
-    const token = jwt.sign({ id: newUser.id, role: newUser.role }, JWT_SECRET, { expiresIn: '7d' });
-    res.status(201).json({
-      token,
-      user: {
-        id: newUser.id,
-        fullName: newUser.fullName,
-        email: newUser.email,
-        role: newUser.role,
-        subscription: newUser.subscription
-      }
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/auth/login', async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    const user = users.find(u => u.email === email);
-    if (!user) return res.status(401).json({ error: 'Email ou mot de passe incorrect' });
-
-    const valid = await bcrypt.compare(password, user.password);
-    if (!valid) return res.status(401).json({ error: 'Email ou mot de passe incorrect' });
-
-    if (user.role !== 'super_admin' && user.role !== 'admin') {
-      const now = new Date();
-      const endDate = new Date(user.subscription.endDate);
-      if (now > endDate && user.subscription.status === 'active') {
-        user.subscription.status = 'expired';
-        saveAll();
-        return res.status(403).json({ error: 'abonnement_expire', message: 'Votre abonnement a expiré.' });
-      }
-    }
-
-    addLog('user_login', { userId: user.id, email, ip: req.ip });
-
-    const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({
-      token,
-      user: {
-        id: user.id,
-        fullName: user.fullName,
-        email: user.email,
-        role: user.role,
-        subscription: user.subscription,
-        shopId: user.shopId
-      }
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ========== ROUTES ADMIN ==========
-app.get('/api/admin/dashboard', auth, authorize('super_admin', 'admin'), (req, res) => {
-  try {
-    const now = new Date();
-    const totalUsers = users.filter(u => u.role === 'user').length;
-    const activeUsers = users.filter(u => u.role === 'user' && u.subscription.status === 'active').length;
-    const expiredUsers = users.filter(u => u.role === 'user' && u.subscription.status === 'expired').length;
-
-    const last30Days = [];
-    for (let i = 29; i >= 0; i--) {
-      const day = new Date(now);
-      day.setDate(day.getDate() - i);
-      const count = users.filter(u => {
-        const d = new Date(u.createdAt);
-        return d.toDateString() === day.toDateString();
-      }).length;
-      last30Days.push({ date: day.toISOString().split('T')[0], count });
-    }
-
-    const userSales = {};
-    users.forEach(u => {
-      if (u.role === 'user') {
-        const userDir = path.join(USER_DATA_ROOT, String(u.id));
-        if (fs.existsSync(userDir)) {
-          const salesFile = path.join(userDir, 'sales.json');
-          const sales = readJSON(salesFile, []);
-          const total = sales.reduce((sum, s) => sum + (s.total || 0), 0);
-          userSales[u.id] = { name: u.fullName, totalSales: sales.length, revenue: total };
+function loadUsers() {
+    if (fs.existsSync(usersFile)) {
+        users = readJSON(usersFile, []);
+        const adminExists = users.find(u => u.email === 'admin@lagrange.com');
+        if (!adminExists) {
+            users.push({
+                id: 1,
+                email: 'admin@lagrange.com',
+                password: bcrypt.hashSync(ADMIN_PASSWORD, 10),
+                fullName: 'Administrateur',
+                role: 'super_admin',
+                createdAt: new Date().toISOString()
+            });
+            writeJSON(usersFile, users);
         }
-      }
+    } else {
+        users = [{
+            id: 1,
+            email: 'admin@lagrange.com',
+            password: bcrypt.hashSync(ADMIN_PASSWORD, 10),
+            fullName: 'Administrateur',
+            role: 'super_admin',
+            createdAt: new Date().toISOString()
+        }];
+        writeJSON(usersFile, users);
+    }
+}
+loadUsers();
+
+// ========== MIDDLEWARES ==========
+function auth(req, res, next) {
+    const token = req.headers['authorization']?.split(' ')[1];
+    if (!token) return res.status(401).json({ error: 'Token manquant' });
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        req.userId = decoded.id;
+        req.userRole = decoded.role;
+        next();
+    } catch (err) {
+        res.status(401).json({ error: 'Token invalide' });
+    }
+}
+
+function adminAuth(req, res, next) {
+    auth(req, res, () => {
+        if (req.userRole !== 'admin' && req.userRole !== 'super_admin') {
+            return res.status(403).json({ error: 'Accès admin requis' });
+        }
+        next();
     });
-    const topUsers = Object.values(userSales).sort((a, b) => b.revenue - a.revenue).slice(0, 10);
+}
 
-    const unreadNotifications = notifications.filter(n => !n.read).length;
-
-    res.json({
-      totalUsers,
-      activeUsers,
-      expiredUsers,
-      unreadNotifications,
-      last30Days,
-      topUsers,
-      notifications: notifications.slice(-50).reverse()
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/admin/users', auth, authorize('super_admin', 'admin'), (req, res) => {
-  try {
-    const { search, status, sort } = req.query;
-    let filtered = users.filter(u => u.role === 'user');
-
-    if (search) {
-      filtered = filtered.filter(u => 
-        u.fullName.toLowerCase().includes(search.toLowerCase()) ||
-        u.email.toLowerCase().includes(search.toLowerCase())
-      );
-    }
-    if (status) {
-      filtered = filtered.filter(u => u.subscription.status === status);
-    }
-    if (sort === 'date') {
-      filtered.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-    }
-
-    const now = new Date();
-    const result = filtered.map(u => {
-      const endDate = new Date(u.subscription.endDate);
-      const daysLeft = Math.ceil((endDate - now) / (1000 * 60 * 60 * 24));
-      return {
-        id: u.id,
-        fullName: u.fullName,
-        email: u.email,
-        status: u.subscription.status,
-        daysLeft: daysLeft,
-        createdAt: u.createdAt,
-        endDate: u.subscription.endDate
-      };
-    });
-
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/admin/users/:id/extend', auth, authorize('super_admin', 'admin'), (req, res) => {
-  try {
-    const user = users.find(u => u.id === parseInt(req.params.id));
-    if (!user) return res.status(404).json({ error: 'Utilisateur non trouvé' });
-    if (user.role === 'super_admin' || user.role === 'admin') {
-      return res.status(403).json({ error: 'Impossible de modifier ce compte' });
-    }
-
-    const { days = 30 } = req.body;
-    const now = new Date();
-    const newEnd = new Date(now);
-    newEnd.setDate(now.getDate() + days);
-    user.subscription.endDate = newEnd.toISOString();
-    user.subscription.status = 'active';
-    saveAll();
-
-    addLog('admin_extend', { userId: user.id, days });
-    addNotification(
-      `✅ Abonnement prolongé`,
-      `L'abonnement de ${user.fullName} a été prolongé de ${days} jours.`,
-      'success'
-    );
-
-    res.json({ message: `Abonnement prolongé de ${days} jours`, newEndDate: user.subscription.endDate });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/admin/users/:id/disable', auth, authorize('super_admin', 'admin'), (req, res) => {
-  try {
-    const user = users.find(u => u.id === parseInt(req.params.id));
-    if (!user) return res.status(404).json({ error: 'Utilisateur non trouvé' });
-    if (user.role === 'super_admin' || user.role === 'admin') {
-      return res.status(403).json({ error: 'Impossible de désactiver ce compte' });
-    }
-    user.subscription.status = 'expired';
-    saveAll();
-    addLog('admin_disable', { userId: user.id });
-    res.json({ message: 'Utilisateur désactivé' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/admin/users/:id/enable', auth, authorize('super_admin', 'admin'), (req, res) => {
-  try {
-    const user = users.find(u => u.id === parseInt(req.params.id));
-    if (!user) return res.status(404).json({ error: 'Utilisateur non trouvé' });
-    const now = new Date();
-    const newEnd = new Date(now);
-    newEnd.setDate(now.getDate() + 15);
-    user.subscription.endDate = newEnd.toISOString();
-    user.subscription.status = 'active';
-    saveAll();
-    addLog('admin_enable', { userId: user.id });
-    res.json({ message: 'Utilisateur réactivé' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/admin/notifications', auth, authorize('super_admin', 'admin'), (req, res) => {
-  res.json(notifications.filter(n => !n.read).reverse());
-});
-
-app.post('/api/admin/notifications/:id/read', auth, authorize('super_admin', 'admin'), (req, res) => {
-  try {
-    const notif = notifications.find(n => n.id === parseInt(req.params.id));
-    if (notif) notif.read = true;
-    writeJSON(path.join(DATA_DIR, 'notifications.json'), notifications);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/admin/notifications/read-all', auth, authorize('super_admin', 'admin'), (req, res) => {
-  notifications.forEach(n => n.read = true);
-  writeJSON(path.join(DATA_DIR, 'notifications.json'), notifications);
-  res.json({ success: true });
-});
-
-app.get('/api/admin/export/users', auth, authorize('super_admin', 'admin'), async (req, res) => {
-  try {
-    const workbook = new ExcelJS.Workbook();
-    const worksheet = workbook.addWorksheet('Utilisateurs');
-    worksheet.columns = [
-      { header: 'ID', key: 'id', width: 10 },
-      { header: 'Nom', key: 'name', width: 20 },
-      { header: 'Email', key: 'email', width: 30 },
-      { header: 'Statut', key: 'status', width: 15 },
-      { header: 'Inscrit le', key: 'createdAt', width: 20 },
-      { header: 'Expire le', key: 'endDate', width: 20 }
-    ];
-    users.filter(u => u.role === 'user').forEach(u => {
-      worksheet.addRow({
-        id: u.id,
-        name: u.fullName,
-        email: u.email,
-        status: u.subscription.status,
-        createdAt: new Date(u.createdAt).toLocaleDateString('fr-FR'),
-        endDate: new Date(u.subscription.endDate).toLocaleDateString('fr-FR')
-      });
-    });
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', 'attachment; filename=utilisateurs.xlsx');
-    await workbook.xlsx.write(res);
-    res.end();
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ========== ROUTES ADMIN ALL-SALES ==========
-app.get('/api/admin/all-sales', auth, authorize('super_admin', 'admin'), (req, res) => {
-  try {
-    const allSales = [];
-    const userDirs = fs.readdirSync(USER_DATA_ROOT);
-    
-    userDirs.forEach(userId => {
-      const salesFile = path.join(USER_DATA_ROOT, userId, 'sales.json');
-      if (fs.existsSync(salesFile)) {
-        const sales = readJSON(salesFile, []);
-        const user = users.find(u => u.id === parseInt(userId));
-        sales.forEach(sale => {
-          allSales.push({
-            ...sale,
-            userId: parseInt(userId),
-            userName: user?.fullName || 'Inconnu',
-            userEmail: user?.email || 'Inconnu'
-          });
+// ========== AUTHENTIFICATION ==========
+app.post('/api/auth/login', (req, res) => {
+    try {
+        const { email, password } = req.body;
+        const user = users.find(u => u.email === email);
+        if (!user || !bcrypt.compareSync(password, user.password)) {
+            return res.status(401).json({ error: 'Email ou mot de passe incorrect' });
+        }
+        const token = jwt.sign(
+            { id: user.id, email: user.email, role: user.role },
+            JWT_SECRET,
+            { expiresIn: '7d' }
+        );
+        res.json({
+            token,
+            user: {
+                id: user.id,
+                email: user.email,
+                fullName: user.fullName,
+                role: user.role
+            }
         });
-      }
-    });
-    
-    res.json(allSales.sort((a, b) => new Date(b.date) - new Date(a.date)));
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-// ========== ROUTES DE L'UTILISATEUR ==========
+app.post('/api/auth/register', adminAuth, (req, res) => {
+    try {
+        const { email, password, fullName, role = 'user' } = req.body;
+        if (users.find(u => u.email === email)) {
+            return res.status(400).json({ error: 'Email déjà utilisé' });
+        }
+        const newUser = {
+            id: generateId(),
+            email,
+            password: bcrypt.hashSync(password, 10),
+            fullName,
+            role,
+            createdAt: new Date().toISOString()
+        };
+        users.push(newUser);
+        writeJSON(usersFile, users);
+        getUserDataDir(newUser.id);
+        res.json({
+            success: true,
+            user: {
+                id: newUser.id,
+                email: newUser.email,
+                fullName: newUser.fullName,
+                role: newUser.role
+            }
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/auth/me', auth, (req, res) => {
+    try {
+        const user = users.find(u => u.id === req.userId);
+        if (!user) return res.status(404).json({ error: 'Utilisateur non trouvé' });
+        res.json({
+            id: user.id,
+            email: user.email,
+            fullName: user.fullName,
+            role: user.role
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
 
 // ========== BOUTIQUES ==========
-app.post('/api/shops', auth, checkSubscription, (req, res) => {
-  try {
-    const { name, address, phone } = req.body;
-    if (!name) return res.status(400).json({ error: 'Nom requis' });
-    const userDir = getUserDataDir(req.userId);
-    const shops = readJSON(path.join(userDir, 'shops.json'), []);
-    const shop = {
-      id: shops.length + 1,
-      name,
-      address: address || '',
-      phone: phone || '',
-      ownerId: req.userId,
-      createdAt: new Date().toISOString()
-    };
-    shops.push(shop);
-    writeJSON(path.join(userDir, 'shops.json'), shops);
-    addLog('shop_create', { userId: req.userId, shopName: name });
-    res.status(201).json(shop);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.get('/api/shops', auth, (req, res) => {
+    try {
+        const userDir = getUserDataDir(req.userId);
+        const shops = readJSON(path.join(userDir, 'shops.json'), []);
+        res.json(shops);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.get('/api/shops', auth, (req, res) => {
-  try {
-    const userDir = getUserDataDir(req.userId);
-    const shops = readJSON(path.join(userDir, 'shops.json'), []);
-    const user = users.find(u => u.id === req.userId);
-    let userShops = [];
-    if (user.role === 'vendor' && user.shopId) {
-      const shop = shops.find(s => s.id === user.shopId);
-      if (shop) userShops = [shop];
-    } else {
-      userShops = shops.filter(s => s.ownerId === req.userId);
+app.post('/api/shops', auth, (req, res) => {
+    try {
+        const { name, address, phone } = req.body;
+        const userDir = getUserDataDir(req.userId);
+        const shops = readJSON(path.join(userDir, 'shops.json'), []);
+        const newShop = {
+            id: generateId(),
+            name,
+            address: address || '',
+            phone: phone || '',
+            createdAt: new Date().toISOString()
+        };
+        shops.push(newShop);
+        writeJSON(path.join(userDir, 'shops.json'), shops);
+        res.json(newShop);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-    res.json(userShops);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
 
 app.delete('/api/shops/:id', auth, (req, res) => {
-  try {
-    const userDir = getUserDataDir(req.userId);
-    let shops = readJSON(path.join(userDir, 'shops.json'), []);
-    const index = shops.findIndex(s => s.id === parseInt(req.params.id) && s.ownerId === req.userId);
-    if (index === -1) return res.status(404).json({ error: 'Boutique non trouvee' });
-    shops.splice(index, 1);
-    writeJSON(path.join(userDir, 'shops.json'), shops);
-    let products = readJSON(path.join(userDir, 'products.json'), []);
-    products = products.filter(p => p.shopId !== parseInt(req.params.id));
-    writeJSON(path.join(userDir, 'products.json'), products);
-    res.status(204).send();
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    try {
+        const userDir = getUserDataDir(req.userId);
+        let shops = readJSON(path.join(userDir, 'shops.json'), []);
+        shops = shops.filter(s => s.id !== parseInt(req.params.id));
+        writeJSON(path.join(userDir, 'shops.json'), shops);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // ========== PRODUITS ==========
-app.post('/api/products', auth, checkSubscription, (req, res) => {
-  try {
-    const { name, sellingPrice, quantity, alertThreshold, shopId, barcode, image, variants, expiryDate } = req.body;
-    if (!name || !shopId) return res.status(400).json({ error: 'Nom et boutique requis' });
-    const userDir = getUserDataDir(req.userId);
-    const products = readJSON(path.join(userDir, 'products.json'), []);
-    const product = {
-      id: products.length + 1,
-      name,
-      sellingPrice: sellingPrice || 0,
-      quantity: quantity || 0,
-      alertThreshold: alertThreshold || 5,
-      shopId: parseInt(shopId),
-      barcode: barcode || null,
-      image: image || null,
-      variants: variants || [],
-      expiryDate: expiryDate || null,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    };
-    products.push(product);
-    writeJSON(path.join(userDir, 'products.json'), products);
-    if (product.quantity <= product.alertThreshold) {
-      const alerts = readJSON(path.join(userDir, 'alerts.json'), []);
-      alerts.push({
-        id: alerts.length + 1,
-        type: 'low_stock',
-        message: `Stock faible : ${product.name} (${product.quantity} restants)`,
-        level: 'warning',
-        shopId: product.shopId,
-        read: false,
-        createdAt: new Date().toISOString()
-      });
-      writeJSON(path.join(userDir, 'alerts.json'), alerts);
+app.get('/api/products', auth, (req, res) => {
+    try {
+        const { shopId } = req.query;
+        const userDir = getUserDataDir(req.userId);
+        const products = readJSON(path.join(userDir, 'products.json'), []);
+        const filtered = products.filter(p => p.shopId === parseInt(shopId));
+        res.json(filtered);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-    res.status(201).json(product);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
 
-app.get('/api/products', auth, (req, res) => {
-  try {
-    const { shopId, barcode } = req.query;
-    if (!shopId) return res.status(400).json({ error: 'shopId requis' });
-    const userDir = getUserDataDir(req.userId);
-    let products = readJSON(path.join(userDir, 'products.json'), []);
-    let filtered = products.filter(p => p.shopId === parseInt(shopId));
-    if (barcode) filtered = filtered.filter(p => p.barcode === barcode);
-    res.json(filtered);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.post('/api/products', auth, (req, res) => {
+    try {
+        const { name, sellingPrice, quantity, alertThreshold, shopId, barcode, expiryDate, image } = req.body;
+        const userDir = getUserDataDir(req.userId);
+        const products = readJSON(path.join(userDir, 'products.json'), []);
+        const newProduct = {
+            id: generateId(),
+            name,
+            sellingPrice: sellingPrice || 0,
+            quantity: quantity || 0,
+            alertThreshold: alertThreshold || 5,
+            shopId,
+            barcode: barcode || '',
+            expiryDate: expiryDate || null,
+            image: image || null,
+            createdAt: new Date().toISOString()
+        };
+        products.push(newProduct);
+        writeJSON(path.join(userDir, 'products.json'), products);
+        
+        if (newProduct.quantity <= newProduct.alertThreshold) {
+            const alerts = readJSON(path.join(userDir, 'alerts.json'), []);
+            alerts.push({
+                id: generateId(),
+                shopId,
+                type: 'low_stock',
+                title: 'Stock faible',
+                message: 'Stock de ' + newProduct.name + ' est à ' + newProduct.quantity + ' (seuil: ' + newProduct.alertThreshold + ')',
+                read: false,
+                createdAt: new Date().toISOString()
+            });
+            writeJSON(path.join(userDir, 'alerts.json'), alerts);
+        }
+        
+        res.json(newProduct);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.delete('/api/products/:id', auth, (req, res) => {
-  try {
-    const userDir = getUserDataDir(req.userId);
-    let products = readJSON(path.join(userDir, 'products.json'), []);
-    const index = products.findIndex(p => p.id === parseInt(req.params.id));
-    if (index === -1) return res.status(404).json({ error: 'Produit non trouve' });
-    products.splice(index, 1);
-    writeJSON(path.join(userDir, 'products.json'), products);
-    res.status(204).send();
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/products/:id/restock', auth, checkSubscription, (req, res) => {
-  try {
-    const { quantity } = req.body;
-    const id = parseInt(req.params.id);
-    if (!quantity || quantity <= 0) return res.status(400).json({ error: 'Quantité invalide' });
-    const userDir = getUserDataDir(req.userId);
-    const products = readJSON(path.join(userDir, 'products.json'), []);
-    const product = products.find(p => p.id === id);
-    if (!product) return res.status(404).json({ error: 'Produit non trouvé' });
-    product.quantity += quantity;
-    writeJSON(path.join(userDir, 'products.json'), products);
-    res.json({ message: 'Stock mis à jour', product });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ========== ROUTES VARIANTES ET PÉREMPTION ==========
-app.put('/api/products/:id/variants', auth, checkSubscription, (req, res) => {
-  try {
-    const id = parseInt(req.params.id);
-    const { variants, expiryDate } = req.body;
-    
-    const userDir = getUserDataDir(req.userId);
-    let products = readJSON(path.join(userDir, 'products.json'), []);
-    const productIndex = products.findIndex(p => p.id === id);
-    
-    if (productIndex === -1) return res.status(404).json({ error: 'Produit non trouvé' });
-    
-    if (variants) {
-      products[productIndex].variants = variants;
+    try {
+        const userDir = getUserDataDir(req.userId);
+        let products = readJSON(path.join(userDir, 'products.json'), []);
+        products = products.filter(p => p.id !== parseInt(req.params.id));
+        writeJSON(path.join(userDir, 'products.json'), products);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-    
-    if (expiryDate) {
-      products[productIndex].expiryDate = expiryDate;
-    }
-    
-    products[productIndex].updatedAt = new Date().toISOString();
-    writeJSON(path.join(userDir, 'products.json'), products);
-    
-    res.json({ message: 'Variantes mises à jour', product: products[productIndex] });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
 
-// ========== ROUTES PHOTOS PRODUITS ==========
-app.post('/api/products/:id/photo', auth, checkSubscription, (req, res) => {
-  try {
-    const id = parseInt(req.params.id);
-    const { image } = req.body;
-    
-    if (!image) return res.status(400).json({ error: 'Image requise' });
-    
-    const userDir = getUserDataDir(req.userId);
-    let products = readJSON(path.join(userDir, 'products.json'), []);
-    const productIndex = products.findIndex(p => p.id === id);
-    
-    if (productIndex === -1) return res.status(404).json({ error: 'Produit non trouvé' });
-    
-    products[productIndex].image = image;
-    products[productIndex].updatedAt = new Date().toISOString();
-    writeJSON(path.join(userDir, 'products.json'), products);
-    
-    res.json({ message: 'Photo ajoutée', product: products[productIndex] });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.post('/api/products/:id/restock', auth, (req, res) => {
+    try {
+        const { quantity } = req.body;
+        const userDir = getUserDataDir(req.userId);
+        const products = readJSON(path.join(userDir, 'products.json'), []);
+        const product = products.find(p => p.id === parseInt(req.params.id));
+        if (!product) return res.status(404).json({ error: 'Produit non trouvé' });
+        product.quantity += quantity;
+        writeJSON(path.join(userDir, 'products.json'), products);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.put('/api/products/:id/variants', auth, (req, res) => {
+    try {
+        const { variants, expiryDate } = req.body;
+        const userDir = getUserDataDir(req.userId);
+        const products = readJSON(path.join(userDir, 'products.json'), []);
+        const product = products.find(p => p.id === parseInt(req.params.id));
+        if (!product) return res.status(404).json({ error: 'Produit non trouvé' });
+        product.variants = variants || [];
+        if (expiryDate) product.expiryDate = expiryDate;
+        writeJSON(path.join(userDir, 'products.json'), products);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/products/:id/photo', auth, (req, res) => {
+    try {
+        const { image } = req.body;
+        const userDir = getUserDataDir(req.userId);
+        const products = readJSON(path.join(userDir, 'products.json'), []);
+        const product = products.find(p => p.id === parseInt(req.params.id));
+        if (!product) return res.status(404).json({ error: 'Produit non trouvé' });
+        product.image = image;
+        writeJSON(path.join(userDir, 'products.json'), products);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // ========== VENTES ==========
-app.post('/api/sales', auth, checkSubscription, (req, res) => {
-  try {
-    const { productId, quantity, shopId, customPrice, customerName, paymentMethod } = req.body;
-    const currentUser = users.find(u => u.id === req.userId);
-    const userDir = getUserDataDir(req.userId);
-    let products = readJSON(path.join(userDir, 'products.json'), []);
-    let sales = readJSON(path.join(userDir, 'sales.json'), []);
-    let invoices = readJSON(path.join(userDir, 'invoices.json'), []);
-    let alerts = readJSON(path.join(userDir, 'alerts.json'), []);
-
-    if (currentUser.role === 'vendor' && currentUser.shopId !== shopId) {
-      return res.status(403).json({ error: 'Vous ne pouvez vendre que dans votre boutique' });
+app.post('/api/sales', auth, (req, res) => {
+    try {
+        const { productId, quantity, shopId, customPrice, customerName, paymentMethod } = req.body;
+        const userDir = getUserDataDir(req.userId);
+        const products = readJSON(path.join(userDir, 'products.json'), []);
+        const sales = readJSON(path.join(userDir, 'sales.json'), []);
+        
+        const product = products.find(p => p.id === productId && p.shopId === shopId);
+        if (!product) return res.status(404).json({ error: 'Produit non trouvé' });
+        if (product.quantity < quantity) return res.status(400).json({ error: 'Stock insuffisant' });
+        
+        const unitPrice = customPrice || product.sellingPrice;
+        const total = unitPrice * quantity;
+        
+        product.quantity -= quantity;
+        writeJSON(path.join(userDir, 'products.json'), products);
+        
+        const sale = {
+            id: generateId(),
+            productId,
+            productName: product.name,
+            quantity,
+            unitPrice,
+            total,
+            shopId,
+            customerName: customerName || 'Client',
+            sellerId: req.userId,
+            sellerName: users.find(u => u.id === req.userId)?.fullName || 'Inconnu',
+            paymentMethod: paymentMethod || 'cash',
+            date: new Date().toISOString(),
+            cancelled: false
+        };
+        sales.push(sale);
+        writeJSON(path.join(userDir, 'sales.json'), sales);
+        
+        const invoices = readJSON(path.join(userDir, 'invoices.json'), []);
+        const invoiceNumber = 'INV-' + String(generateId()).slice(-6);
+        const invoice = {
+            id: generateId(),
+            invoiceNumber,
+            saleId: sale.id,
+            sale,
+            total,
+            createdAt: new Date().toISOString()
+        };
+        invoices.push(invoice);
+        writeJSON(path.join(userDir, 'invoices.json'), invoices);
+        
+        if (product.quantity <= product.alertThreshold) {
+            const alerts = readJSON(path.join(userDir, 'alerts.json'), []);
+            alerts.push({
+                id: generateId(),
+                shopId,
+                type: 'low_stock',
+                title: 'Stock faible',
+                message: 'Stock de ' + product.name + ' est à ' + product.quantity + ' (seuil: ' + product.alertThreshold + ')',
+                read: false,
+                createdAt: new Date().toISOString()
+            });
+            writeJSON(path.join(userDir, 'alerts.json'), alerts);
+        }
+        
+        let perfMessage = '';
+        const totalSalesToday = sales.filter(s => new Date(s.date).toDateString() === new Date().toDateString()).length;
+        if (totalSalesToday >= 10) perfMessage = '🎉 Excellent ! Déjà ' + totalSalesToday + ' ventes aujourd\'hui !';
+        else if (totalSalesToday >= 5) perfMessage = '💪 Bonne journée ! ' + totalSalesToday + ' ventes déjà.';
+        else if (totalSalesToday >= 3) perfMessage = '👍 Pas mal, continuez !';
+        
+        res.json({ success: true, sale, performanceMessage: perfMessage });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-
-    const productIndex = products.findIndex(p => p.id === productId && p.shopId === shopId);
-    if (productIndex === -1) return res.status(404).json({ error: 'Produit non trouve' });
-    if (products[productIndex].quantity < quantity) return res.status(400).json({ error: 'Stock insuffisant' });
-
-    const unitPrice = customPrice || products[productIndex].sellingPrice;
-    const subtotal = unitPrice * quantity;
-    const tax = subtotal * (adminConfig.taxRate / 100);
-    const total = subtotal + tax;
-
-    const sale = {
-      id: sales.length + 1,
-      productId,
-      productName: products[productIndex].name,
-      quantity,
-      unitPrice,
-      subtotal,
-      tax,
-      total,
-      sellerId: req.userId,
-      sellerName: currentUser.fullName,
-      shopId: parseInt(shopId),
-      recommendedPrice: products[productIndex].sellingPrice,
-      customerName: customerName || 'Client',
-      paymentMethod: paymentMethod || 'cash',
-      date: new Date().toISOString(),
-      cancelled: false,
-      cancelledAt: null,
-      cancelledBy: null
-    };
-    sales.push(sale);
-    products[productIndex].quantity -= quantity;
-
-    const invoice = {
-      id: invoices.length + 1,
-      saleId: sale.id,
-      invoiceNumber: `INV-${String(sale.id).padStart(6, '0')}`,
-      total,
-      createdAt: new Date().toISOString()
-    };
-    invoices.push(invoice);
-
-    if (products[productIndex].quantity <= products[productIndex].alertThreshold) {
-      alerts.push({
-        id: alerts.length + 1,
-        type: 'low_stock',
-        message: `${products[productIndex].name} : stock faible (${products[productIndex].quantity})`,
-        level: 'warning',
-        shopId: parseInt(shopId),
-        read: false,
-        createdAt: new Date().toISOString()
-      });
-    }
-
-    writeJSON(path.join(userDir, 'products.json'), products);
-    writeJSON(path.join(userDir, 'sales.json'), sales);
-    writeJSON(path.join(userDir, 'invoices.json'), invoices);
-    writeJSON(path.join(userDir, 'alerts.json'), alerts);
-
-    // Notification admin pour synchronisation vendeur-admin
-    if (currentUser.role === 'vendor') {
-      addNotification(
-        `🛒 Nouvelle vente effectuée par ${currentUser.fullName}`,
-        `Vente de ${quantity} x ${products[productIndex].name} pour ${total} ${currency || 'FCFA'}`,
-        'info'
-      );
-    }
-
-    let performanceMessage = '';
-    if (unitPrice > products[productIndex].sellingPrice) {
-      performanceMessage = `Excellent ! Vous avez vendu ${unitPrice - products[productIndex].sellingPrice} FCFA au-dessus du prix recommande. Bravo !`;
-    } else if (unitPrice < products[productIndex].sellingPrice) {
-      performanceMessage = `Attention : Vous avez vendu ${products[productIndex].sellingPrice - unitPrice} FCFA en dessous du prix recommande.`;
-    } else {
-      performanceMessage = 'Prix respecte. Bon travail !';
-    }
-
-    addLog('sale_create', { userId: req.userId, productId, quantity, total });
-    res.status(201).json({ sale, invoice, performanceMessage });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/sales/:id/cancel', auth, (req, res) => {
-  try {
-    const saleId = parseInt(req.params.id);
-    const userDir = getUserDataDir(req.userId);
-    let sales = readJSON(path.join(userDir, 'sales.json'), []);
-    let products = readJSON(path.join(userDir, 'products.json'), []);
-    const sale = sales.find(s => s.id === saleId);
-    if (!sale) return res.status(404).json({ error: 'Vente non trouvee' });
-    if (sale.cancelled) return res.status(400).json({ error: 'Vente deja annulee' });
-
-    const currentUser = users.find(u => u.id === req.userId);
-    const now = new Date();
-    const saleDate = new Date(sale.date);
-    const diffMinutes = (now - saleDate) / (1000 * 60);
-
-    if (currentUser.role !== 'super_admin' && currentUser.role !== 'admin' && diffMinutes > 15) {
-      return res.status(403).json({ error: 'Delai de 15 minutes depasse. Seul un administrateur peut annuler cette vente.' });
-    }
-
-    const product = products.find(p => p.id === sale.productId);
-    if (product) product.quantity += sale.quantity;
-    sale.cancelled = true;
-    sale.cancelledAt = now.toISOString();
-    sale.cancelledBy = currentUser.fullName;
-
-    writeJSON(path.join(userDir, 'products.json'), products);
-    writeJSON(path.join(userDir, 'sales.json'), sales);
-    res.json({ message: 'Vente annulee avec succes', sale });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
 
 app.get('/api/sales', auth, (req, res) => {
-  try {
-    const { shopId } = req.query;
-    const userDir = getUserDataDir(req.userId);
-    let sales = readJSON(path.join(userDir, 'sales.json'), []);
-    const currentUser = users.find(u => u.id === req.userId);
-    let filteredSales = sales.filter(s => s.shopId === parseInt(shopId) && !s.cancelled);
-    if (currentUser.role === 'vendor') filteredSales = filteredSales.filter(s => s.sellerId === req.userId);
-    res.json(filteredSales.sort((a, b) => new Date(b.date) - new Date(a.date)));
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    try {
+        const { shopId } = req.query;
+        const userDir = getUserDataDir(req.userId);
+        const sales = readJSON(path.join(userDir, 'sales.json'), []);
+        const filtered = sales.filter(s => s.shopId === parseInt(shopId) && !s.cancelled);
+        res.json(filtered.sort((a, b) => new Date(b.date) - new Date(a.date)));
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/sales/:id/cancel', auth, (req, res) => {
+    try {
+        const userDir = getUserDataDir(req.userId);
+        const sales = readJSON(path.join(userDir, 'sales.json'), []);
+        const sale = sales.find(s => s.id === parseInt(req.params.id));
+        if (!sale) return res.status(404).json({ error: 'Vente non trouvée' });
+        if (sale.cancelled) return res.status(400).json({ error: 'Vente déjà annulée' });
+        
+        const saleDate = new Date(sale.date);
+        const now = new Date();
+        const diffMinutes = (now - saleDate) / 60000;
+        if (req.userRole !== 'admin' && req.userRole !== 'super_admin' && diffMinutes > 15) {
+            return res.status(400).json({ error: 'Délai de 15 minutes dépassé' });
+        }
+        
+        sale.cancelled = true;
+        writeJSON(path.join(userDir, 'sales.json'), sales);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // ========== FACTURES ==========
 app.get('/api/invoices', auth, (req, res) => {
-  try {
-    const { shopId } = req.query;
-    const userDir = getUserDataDir(req.userId);
-    let invoices = readJSON(path.join(userDir, 'invoices.json'), []);
-    let sales = readJSON(path.join(userDir, 'sales.json'), []);
-    let filteredInvoices = invoices;
-    if (shopId) {
-      const saleIds = sales.filter(s => s.shopId === parseInt(shopId)).map(s => s.id);
-      filteredInvoices = invoices.filter(inv => saleIds.includes(inv.saleId));
+    try {
+        const { shopId } = req.query;
+        const userDir = getUserDataDir(req.userId);
+        const invoices = readJSON(path.join(userDir, 'invoices.json'), []);
+        const filtered = invoices.filter(i => i.sale?.shopId === parseInt(shopId));
+        res.json(filtered);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-    const result = filteredInvoices.map(inv => {
-      const sale = sales.find(s => s.id === inv.saleId);
-      return { ...inv, sale };
-    });
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
 
 app.get('/api/invoices/:saleId/pdf', auth, (req, res) => {
-  try {
-    const saleId = parseInt(req.params.saleId);
-    const userDir = getUserDataDir(req.userId);
-    const sales = readJSON(path.join(userDir, 'sales.json'), []);
-    const products = readJSON(path.join(userDir, 'products.json'), []);
-    const shops = readJSON(path.join(userDir, 'shops.json'), []);
-    const sale = sales.find(s => s.id === saleId);
-    if (!sale) return res.status(404).json({ error: 'Vente non trouvee' });
-
-    const product = products.find(p => p.id === sale.productId);
-    const shop = shops.find(s => s.id === sale.shopId);
-    const seller = users.find(u => u.id === sale.sellerId);
-
-    const doc = new PDFDocument({ margin: 50, size: 'A4' });
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename=facture_${sale.id}.pdf`);
-    doc.pipe(res);
-
-    doc.fontSize(22).font('Helvetica-Bold').text(adminConfig.companyName || 'Lagrange Shop Manager', { align: 'center' });
-    doc.fontSize(10).font('Helvetica').text(adminConfig.companyAddress || '', { align: 'center' });
-    doc.text(`Tel: ${adminConfig.companyPhone || ''} | Email: ${adminConfig.companyEmail || ''}`, { align: 'center' });
-    doc.moveDown();
-    doc.strokeColor('#cccccc').lineWidth(1).moveTo(50, doc.y).lineTo(550, doc.y).stroke();
-    doc.moveDown();
-    doc.fontSize(14).font('Helvetica-Bold').text(sale.cancelled ? 'FACTURE ANNULEE' : 'FACTURE', { align: 'center' });
-    if (sale.cancelled) {
-      doc.fontSize(10).font('Helvetica').text(`Annulee le ${new Date(sale.cancelledAt).toLocaleString()} par ${sale.cancelledBy}`, { align: 'center' });
+    try {
+        const userDir = getUserDataDir(req.userId);
+        const invoices = readJSON(path.join(userDir, 'invoices.json'), []);
+        const invoice = invoices.find(i => i.saleId === parseInt(req.params.saleId));
+        if (!invoice) return res.status(404).json({ error: 'Facture non trouvée' });
+        
+        const doc = new PDFDocument();
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', 'attachment; filename=facture_' + invoice.invoiceNumber + '.pdf');
+        doc.pipe(res);
+        
+        const config = readJSON(path.join(DATA_DIR, 'config.json'), {
+            companyName: 'Lagrange Shop',
+            address: 'Votre adresse',
+            phone: 'Votre téléphone',
+            email: 'contact@lagrange.com',
+            taxRate: 0
+        });
+        
+        doc.fontSize(18).text(config.companyName, { align: 'center' });
+        doc.fontSize(10).text(config.address, { align: 'center' });
+        doc.fontSize(10).text('Tél: ' + config.phone + ' | Email: ' + config.email, { align: 'center' });
+        doc.moveDown();
+        doc.fontSize(14).text('FACTURE N° ' + invoice.invoiceNumber, { align: 'center' });
+        doc.moveDown();
+        doc.fontSize(10).text('Date: ' + new Date(invoice.createdAt).toLocaleDateString('fr-FR'));
+        doc.text('Client: ' + invoice.sale.customerName);
+        doc.moveDown();
+        doc.fontSize(10).text('Produit: ' + invoice.sale.productName);
+        doc.text('Quantité: ' + invoice.sale.quantity);
+        doc.text('Prix unitaire: ' + invoice.sale.unitPrice.toLocaleString() + ' FCFA');
+        doc.moveDown();
+        doc.fontSize(12).text('Total: ' + invoice.total.toLocaleString() + ' FCFA', { align: 'right' });
+        doc.end();
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-    doc.moveDown(0.5);
-    doc.fontSize(10).font('Helvetica');
-    doc.text(`N° Facture: ${String(sale.id).padStart(6, '0')}`, { align: 'right' });
-    doc.text(`Date: ${new Date(sale.date).toLocaleDateString('fr-FR')}`, { align: 'right' });
-    doc.moveDown();
-    doc.fontSize(10).font('Helvetica-Bold').text('Vendeur:', { continued: true });
-    doc.font('Helvetica').text(` ${seller?.fullName || 'N/A'}`);
-    doc.text(`Boutique: ${shop?.name || 'N/A'}`);
-    doc.text(`Adresse: ${shop?.address || 'N/A'}`);
-    doc.moveDown();
-    doc.font('Helvetica-Bold').text('Client:');
-    doc.font('Helvetica').text(sale.customerName || 'Client');
-    doc.moveDown();
-    doc.strokeColor('#cccccc').lineWidth(1).moveTo(50, doc.y).lineTo(550, doc.y).stroke();
-    doc.moveDown();
-
-    const col1 = 50, col3 = 300, col4 = 400, col5 = 500;
-    doc.font('Helvetica-Bold').fontSize(10);
-    doc.text('Designation', col1, doc.y);
-    doc.text('Quantite', col3, doc.y);
-    doc.text('Prix unit.', col4, doc.y);
-    doc.text('Total', col5, doc.y);
-    doc.moveDown();
-    doc.strokeColor('#cccccc').lineWidth(0.5).moveTo(50, doc.y).lineTo(550, doc.y).stroke();
-    doc.font('Helvetica').fontSize(10);
-    doc.text(sale.productName, col1, doc.y);
-    doc.text(sale.quantity.toString(), col3, doc.y);
-    doc.text(`${sale.unitPrice.toLocaleString()} FCFA`, col4, doc.y);
-    doc.text(`${sale.subtotal.toLocaleString()} FCFA`, col5, doc.y);
-    doc.moveDown(2);
-    doc.font('Helvetica-Bold');
-    doc.text('Sous-total:', col4, doc.y);
-    doc.font('Helvetica');
-    doc.text(`${sale.subtotal.toLocaleString()} FCFA`, col5, doc.y);
-    if (sale.tax > 0) {
-      doc.font('Helvetica-Bold');
-      doc.text(`TVA (${adminConfig.taxRate}%):`, col4, doc.y);
-      doc.font('Helvetica');
-      doc.text(`${sale.tax.toLocaleString()} FCFA`, col5, doc.y);
-    }
-    doc.moveDown(0.5);
-    doc.font('Helvetica-Bold').fontSize(12);
-    doc.text('TOTAL:', col4, doc.y);
-    doc.text(`${sale.total.toLocaleString()} FCFA`, col5, doc.y);
-    doc.end();
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
 
 // ========== DÉPENSES ==========
-app.post('/api/expenses', auth, checkSubscription, (req, res) => {
-  try {
-    const { category, amount, date, description, shopId } = req.body;
-    if (!category || !amount || !shopId) return res.status(400).json({ error: 'Categorie, montant et boutique requis' });
-    const userDir = getUserDataDir(req.userId);
-    const expenses = readJSON(path.join(userDir, 'expenses.json'), []);
-    const user = users.find(u => u.id === req.userId);
-    const expense = {
-      id: expenses.length + 1,
-      category,
-      amount,
-      date: date || new Date().toISOString(),
-      description: description || '',
-      shopId: parseInt(shopId),
-      addedBy: req.userId,
-      addedByName: user?.fullName || 'Inconnu',
-      createdAt: new Date().toISOString()
-    };
-    expenses.push(expense);
-    writeJSON(path.join(userDir, 'expenses.json'), expenses);
-    res.status(201).json(expense);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.get('/api/expenses', auth, (req, res) => {
+    try {
+        const { shopId } = req.query;
+        const userDir = getUserDataDir(req.userId);
+        const expenses = readJSON(path.join(userDir, 'expenses.json'), []);
+        const filtered = expenses.filter(e => e.shopId === parseInt(shopId));
+        res.json(filtered);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.get('/api/expenses', auth, (req, res) => {
-  try {
-    const { shopId, startDate, endDate, category } = req.query;
-    const userDir = getUserDataDir(req.userId);
-    let expenses = readJSON(path.join(userDir, 'expenses.json'), []);
-    let filtered = expenses.filter(e => e.shopId === parseInt(shopId));
-    if (startDate) filtered = filtered.filter(e => new Date(e.date) >= new Date(startDate));
-    if (endDate) filtered = filtered.filter(e => new Date(e.date) <= new Date(endDate));
-    if (category) filtered = filtered.filter(e => e.category === category);
-    res.json(filtered.sort((a, b) => new Date(b.date) - new Date(a.date)));
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.post('/api/expenses', auth, (req, res) => {
+    try {
+        const { category, amount, date, description, shopId } = req.body;
+        const userDir = getUserDataDir(req.userId);
+        const expenses = readJSON(path.join(userDir, 'expenses.json'), []);
+        const newExpense = {
+            id: generateId(),
+            category,
+            amount,
+            date: date || new Date().toISOString().split('T')[0],
+            description: description || '',
+            shopId,
+            createdAt: new Date().toISOString()
+        };
+        expenses.push(newExpense);
+        writeJSON(path.join(userDir, 'expenses.json'), expenses);
+        res.json(newExpense);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.delete('/api/expenses/:id', auth, (req, res) => {
-  try {
-    const userDir = getUserDataDir(req.userId);
-    let expenses = readJSON(path.join(userDir, 'expenses.json'), []);
-    const index = expenses.findIndex(e => e.id === parseInt(req.params.id));
-    if (index === -1) return res.status(404).json({ error: 'Depense non trouvee' });
-    expenses.splice(index, 1);
-    writeJSON(path.join(userDir, 'expenses.json'), expenses);
-    res.status(204).send();
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ========== VENDEURS ==========
-app.post('/api/vendors', auth, checkSubscription, async (req, res) => {
-  try {
-    const { email, fullName, phone, cni, address, shopId, commission } = req.body;
-    if (!email || !fullName) return res.status(400).json({ error: 'Email et nom requis' });
-    if (users.find(u => u.email === email)) return res.status(400).json({ error: 'Email deja utilise' });
-
-    const tempPassword = Math.random().toString(36).slice(-8);
-    const hashedPassword = await bcrypt.hash(tempPassword, 10);
-
-    const vendor = {
-      id: users.length + 1,
-      fullName,
-      email,
-      password: hashedPassword,
-      role: 'vendor',
-      shopId: parseInt(shopId),
-      phone: phone || null,
-      cni: cni || null,
-      address: address || null,
-      hireDate: new Date().toISOString(),
-      commission: commission || 0,
-      bonus: 0,
-      createdAt: new Date().toISOString(),
-      subscription: { status: 'active', startDate: new Date().toISOString(), endDate: null, plan: 'vendor' }
-    };
-    users.push(vendor);
-    saveAll();
-    addLog('vendor_create', { userId: vendor.id, email });
-    res.status(201).json({
-      message: `Vendeur invite. Mot de passe : ${tempPassword}`,
-      tempPassword,
-      vendor: { id: vendor.id, fullName, email, phone, cni, address, commission: vendor.commission }
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/vendors', auth, (req, res) => {
-  try {
-    const { shopId } = req.query;
-    let vendors = users.filter(u => u.role === 'vendor');
-    if (shopId) vendors = vendors.filter(v => v.shopId === parseInt(shopId));
-    res.json(vendors.map(({ password, ...v }) => v));
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.delete('/api/vendors/:id', auth, (req, res) => {
-  try {
-    const index = users.findIndex(u => u.id === parseInt(req.params.id) && u.role === 'vendor');
-    if (index === -1) return res.status(404).json({ error: 'Vendeur non trouve' });
-    users.splice(index, 1);
-    saveAll();
-    res.status(204).send();
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ========== TRANSFERT STOCK ==========
-app.post('/api/transfer-stock', auth, checkSubscription, (req, res) => {
-  try {
-    const { fromShopId, toShopId, productId, quantity } = req.body;
-    const userDir = getUserDataDir(req.userId);
-    let products = readJSON(path.join(userDir, 'products.json'), []);
-    let transfers = readJSON(path.join(userDir, 'transfers.json'), []);
-
-    const fromProductIndex = products.findIndex(p => p.id === productId && p.shopId === fromShopId);
-    if (fromProductIndex === -1) return res.status(404).json({ error: 'Produit source non trouve' });
-    if (products[fromProductIndex].quantity < quantity) return res.status(400).json({ error: 'Stock insuffisant' });
-
-    let toProductIndex = products.findIndex(p => p.name === products[fromProductIndex].name && p.shopId === toShopId);
-    if (toProductIndex === -1) {
-      products.push({
-        ...products[fromProductIndex],
-        id: products.length + 1,
-        shopId: toShopId,
-        quantity: 0
-      });
-      toProductIndex = products.length - 1;
+    try {
+        const userDir = getUserDataDir(req.userId);
+        let expenses = readJSON(path.join(userDir, 'expenses.json'), []);
+        expenses = expenses.filter(e => e.id !== parseInt(req.params.id));
+        writeJSON(path.join(userDir, 'expenses.json'), expenses);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-    products[fromProductIndex].quantity -= quantity;
-    products[toProductIndex].quantity += quantity;
-    transfers.push({
-      id: transfers.length + 1,
-      fromShopId,
-      toShopId,
-      productName: products[fromProductIndex].name,
-      quantity,
-      date: new Date().toISOString()
-    });
-    writeJSON(path.join(userDir, 'products.json'), products);
-    writeJSON(path.join(userDir, 'transfers.json'), transfers);
-    res.json({ message: 'Transfert effectue' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/transfer-history', auth, (req, res) => {
-  try {
-    const userDir = getUserDataDir(req.userId);
-    const transfers = readJSON(path.join(userDir, 'transfers.json'), []);
-    res.json(transfers);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ========== DASHBOARD UTILISATEUR ==========
-app.get('/api/dashboard/stats', auth, (req, res) => {
-  try {
-    const { shopId } = req.query;
-    const userDir = getUserDataDir(req.userId);
-    const sales = readJSON(path.join(userDir, 'sales.json'), []);
-    const products = readJSON(path.join(userDir, 'products.json'), []);
-    const expenses = readJSON(path.join(userDir, 'expenses.json'), []);
-
-    const shopSales = sales.filter(s => s.shopId === parseInt(shopId) && !s.cancelled);
-    const shopProducts = products.filter(p => p.shopId === parseInt(shopId));
-    const shopExpenses = expenses.filter(e => e.shopId === parseInt(shopId));
-
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const yesterday = new Date(today);
-    yesterday.setDate(today.getDate() - 1);
-    const startOfWeek = new Date(now);
-    startOfWeek.setDate(now.getDate() - 7);
-
-    const salesToday = shopSales.filter(s => new Date(s.date) >= today).length;
-    const salesYesterday = shopSales.filter(s => new Date(s.date) >= yesterday && new Date(s.date) < today).length;
-    const weeklySales = shopSales.filter(s => new Date(s.date) >= startOfWeek).length;
-    const monthlySales = shopSales.length;
-    const revenue = shopSales.reduce((sum, s) => sum + s.total, 0);
-    const lowStockCount = shopProducts.filter(p => p.quantity > 0 && p.quantity <= p.alertThreshold).length;
-    const outOfStockCount = shopProducts.filter(p => p.quantity === 0).length;
-    let salesEvolution = 0;
-    if (salesYesterday > 0) salesEvolution = ((salesToday - salesYesterday) / salesYesterday) * 100;
-    else if (salesToday > 0) salesEvolution = 100;
-    const totalExpenses = shopExpenses.reduce((sum, e) => sum + e.amount, 0);
-    const netProfit = revenue - totalExpenses;
-
-    const dailyChart = [];
-    for (let i = 6; i >= 0; i--) {
-      const day = new Date(now);
-      day.setDate(day.getDate() - i);
-      day.setHours(0, 0, 0, 0);
-      const count = shopSales.filter(s => new Date(s.date) >= day && new Date(s.date) < new Date(day.getTime() + 86400000)).length;
-      dailyChart.push({ date: day.toLocaleDateString('fr-FR', { weekday: 'short' }), count });
-    }
-
-    const productSales = {};
-    shopSales.forEach(s => { productSales[s.productId] = (productSales[s.productId] || 0) + s.quantity; });
-    const topProducts = Object.entries(productSales).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([id, qty]) => ({
-      name: shopProducts.find(p => p.id === parseInt(id))?.name || 'Inconnu',
-      quantitySold: qty
-    }));
-
-    const sellerSales = {};
-    shopSales.forEach(s => { sellerSales[s.sellerId] = (sellerSales[s.sellerId] || 0) + s.total; });
-    const topSellers = Object.entries(sellerSales).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([id, total]) => ({
-      name: users.find(u => u.id === parseInt(id))?.fullName || 'Inconnu',
-      revenue: total
-    }));
-
-    const expensesByCategory = {};
-    shopExpenses.forEach(e => { expensesByCategory[e.category] = (expensesByCategory[e.category] || 0) + e.amount; });
-
-    res.json({
-      dailySales: salesToday,
-      yesterdaySales: salesYesterday,
-      weeklySales,
-      monthlySales,
-      revenue,
-      salesEvolution,
-      totalExpenses,
-      netProfit,
-      lowStockCount,
-      outOfStockCount,
-      dailyChart,
-      topProducts,
-      topSellers,
-      expensesByCategory
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ========== STATS AVANCÉES DASHBOARD ==========
-app.get('/api/dashboard/advanced-stats', auth, (req, res) => {
-  try {
-    const { shopId } = req.query;
-    const userDir = getUserDataDir(req.userId);
-    const sales = readJSON(path.join(userDir, 'sales.json'), []);
-    const products = readJSON(path.join(userDir, 'products.json'), []);
-    const expenses = readJSON(path.join(userDir, 'expenses.json'), []);
-    
-    const shopSales = sales.filter(s => s.shopId === parseInt(shopId) && !s.cancelled);
-    const shopProducts = products.filter(p => p.shopId === parseInt(shopId));
-    const shopExpenses = expenses.filter(e => e.shopId === parseInt(shopId));
-    
-    // 1. Panier moyen
-    const totalSales = shopSales.length;
-    const totalRevenue = shopSales.reduce((sum, s) => sum + s.total, 0);
-    const averageCart = totalSales > 0 ? totalRevenue / totalSales : 0;
-    
-    // 2. Taux de conversion (simulé)
-    const conversionRate = totalSales > 0 ? Math.min(100, (totalSales / (totalSales + 10)) * 100) : 0;
-    
-    // 3. Produit le plus rentable (marge estimée)
-    const productProfit = {};
-    shopSales.forEach(s => {
-      const profit = s.unitPrice * 0.3;
-      productProfit[s.productId] = (productProfit[s.productId] || 0) + profit;
-    });
-    let mostProfitableProduct = null;
-    if (Object.keys(productProfit).length > 0) {
-      const topId = Object.keys(productProfit).reduce((a, b) => productProfit[a] > productProfit[b] ? a : b);
-      const product = shopProducts.find(p => p.id === parseInt(topId));
-      mostProfitableProduct = {
-        name: product?.name || 'Inconnu',
-        profit: productProfit[topId]
-      };
-    }
-    
-    // 4. Saisonnalité
-    const monthlySales = {};
-    shopSales.forEach(s => {
-      const month = new Date(s.date).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
-      monthlySales[month] = (monthlySales[month] || 0) + s.total;
-    });
-    
-    // 5. Objectif mensuel
-    const monthlyTarget = 1000000;
-    const currentMonthRevenue = shopSales.filter(s => {
-      const d = new Date(s.date);
-      const now = new Date();
-      return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
-    }).reduce((sum, s) => sum + s.total, 0);
-    
-    const targetProgress = Math.min(100, (currentMonthRevenue / monthlyTarget) * 100);
-    
-    res.json({
-      averageCart,
-      conversionRate: Math.round(conversionRate * 10) / 10,
-      mostProfitableProduct,
-      monthlySales,
-      monthlyTarget,
-      currentMonthRevenue,
-      targetProgress: Math.round(targetProgress * 10) / 10
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ========== STATS MOYENS DE PAIEMENT ==========
-app.get('/api/dashboard/payment-stats', auth, (req, res) => {
-  try {
-    const { shopId } = req.query;
-    const userDir = getUserDataDir(req.userId);
-    const sales = readJSON(path.join(userDir, 'sales.json'), []);
-    
-    const shopSales = sales.filter(s => s.shopId === parseInt(shopId) && !s.cancelled);
-    const paymentStats = {};
-    
-    shopSales.forEach(s => {
-      const method = s.paymentMethod || 'cash';
-      paymentStats[method] = (paymentStats[method] || 0) + s.total;
-    });
-    
-    res.json(paymentStats);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
 
 // ========== FOURNISSEURS ==========
-app.post('/api/suppliers', auth, checkSubscription, (req, res) => {
-  try {
-    const { name, contact, phone, email, address, products } = req.body;
-    if (!name) return res.status(400).json({ error: 'Nom requis' });
-    
-    const userDir = getUserDataDir(req.userId);
-    const suppliers = readJSON(path.join(userDir, 'suppliers.json'), []);
-    
-    const supplier = {
-      id: suppliers.length + 1,
-      name,
-      contact: contact || '',
-      phone: phone || '',
-      email: email || '',
-      address: address || '',
-      products: products || [],
-      shopId: currentShopId || req.body.shopId,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    };
-    
-    suppliers.push(supplier);
-    writeJSON(path.join(userDir, 'suppliers.json'), suppliers);
-    addLog('supplier_create', { userId: req.userId, supplierName: name });
-    res.status(201).json(supplier);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 app.get('/api/suppliers', auth, (req, res) => {
-  try {
-    const { shopId } = req.query;
-    if (!shopId) return res.status(400).json({ error: 'shopId requis' });
-    
-    const userDir = getUserDataDir(req.userId);
-    const suppliers = readJSON(path.join(userDir, 'suppliers.json'), []);
-    const filtered = suppliers.filter(s => s.shopId === parseInt(shopId));
-    res.json(filtered);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    try {
+        const { shopId } = req.query;
+        const userDir = getUserDataDir(req.userId);
+        const suppliers = readJSON(path.join(userDir, 'suppliers.json'), []);
+        const filtered = suppliers.filter(s => s.shopId === parseInt(shopId));
+        res.json(filtered);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.put('/api/suppliers/:id', auth, checkSubscription, (req, res) => {
-  try {
-    const id = parseInt(req.params.id);
-    const { name, contact, phone, email, address, products } = req.body;
-    
-    const userDir = getUserDataDir(req.userId);
-    let suppliers = readJSON(path.join(userDir, 'suppliers.json'), []);
-    const index = suppliers.findIndex(s => s.id === id);
-    
-    if (index === -1) return res.status(404).json({ error: 'Fournisseur non trouvé' });
-    
-    suppliers[index] = {
-      ...suppliers[index],
-      name: name || suppliers[index].name,
-      contact: contact || suppliers[index].contact,
-      phone: phone || suppliers[index].phone,
-      email: email || suppliers[index].email,
-      address: address || suppliers[index].address,
-      products: products || suppliers[index].products,
-      updatedAt: new Date().toISOString()
-    };
-    
-    writeJSON(path.join(userDir, 'suppliers.json'), suppliers);
-    addLog('supplier_update', { userId: req.userId, supplierId: id });
-    res.json(suppliers[index]);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+app.post('/api/suppliers', auth, (req, res) => {
+    try {
+        const { name, contact, phone, email, address, shopId } = req.body;
+        const userDir = getUserDataDir(req.userId);
+        const suppliers = readJSON(path.join(userDir, 'suppliers.json'), []);
+        const newSupplier = {
+            id: generateId(),
+            name,
+            contact: contact || '',
+            phone: phone || '',
+            email: email || '',
+            address: address || '',
+            shopId,
+            createdAt: new Date().toISOString()
+        };
+        suppliers.push(newSupplier);
+        writeJSON(path.join(userDir, 'suppliers.json'), suppliers);
+        res.json(newSupplier);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.delete('/api/suppliers/:id', auth, (req, res) => {
-  try {
-    const id = parseInt(req.params.id);
-    const userDir = getUserDataDir(req.userId);
-    let suppliers = readJSON(path.join(userDir, 'suppliers.json'), []);
-    const index = suppliers.findIndex(s => s.id === id);
-    
-    if (index === -1) return res.status(404).json({ error: 'Fournisseur non trouvé' });
-    
-    suppliers.splice(index, 1);
-    writeJSON(path.join(userDir, 'suppliers.json'), suppliers);
-    addLog('supplier_delete', { userId: req.userId, supplierId: id });
-    res.status(204).send();
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    try {
+        const userDir = getUserDataDir(req.userId);
+        let suppliers = readJSON(path.join(userDir, 'suppliers.json'), []);
+        suppliers = suppliers.filter(s => s.id !== parseInt(req.params.id));
+        writeJSON(path.join(userDir, 'suppliers.json'), suppliers);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // ========== BONS DE COMMANDE ==========
-app.post('/api/purchase-orders', auth, checkSubscription, (req, res) => {
-  try {
-    const { supplierId, products: orderedProducts, notes, shopId } = req.body;
-    if (!supplierId || !orderedProducts || orderedProducts.length === 0) {
-      return res.status(400).json({ error: 'Fournisseur et produits requis' });
-    }
-    
-    const userDir = getUserDataDir(req.userId);
-    const orders = readJSON(path.join(userDir, 'purchase-orders.json'), []);
-    const suppliers = readJSON(path.join(userDir, 'suppliers.json'), []);
-    const supplier = suppliers.find(s => s.id === parseInt(supplierId));
-    
-    if (!supplier) return res.status(404).json({ error: 'Fournisseur non trouvé' });
-    
-    const order = {
-      id: orders.length + 1,
-      orderNumber: `CMD-${String(orders.length + 1).padStart(6, '0')}`,
-      supplierId: parseInt(supplierId),
-      supplierName: supplier.name,
-      products: orderedProducts.map(p => ({
-        productId: p.productId,
-        productName: p.productName || 'Produit',
-        quantity: p.quantity || 0,
-        unitPrice: p.unitPrice || 0,
-        total: (p.quantity || 0) * (p.unitPrice || 0)
-      })),
-      total: orderedProducts.reduce((sum, p) => sum + ((p.quantity || 0) * (p.unitPrice || 0)), 0),
-      notes: notes || '',
-      status: 'pending',
-      shopId: parseInt(shopId),
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      receivedAt: null
-    };
-    
-    orders.push(order);
-    writeJSON(path.join(userDir, 'purchase-orders.json'), orders);
-    addLog('purchase_order_create', { userId: req.userId, orderId: order.id });
-    res.status(201).json(order);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 app.get('/api/purchase-orders', auth, (req, res) => {
-  try {
-    const { shopId, status } = req.query;
-    if (!shopId) return res.status(400).json({ error: 'shopId requis' });
-    
-    const userDir = getUserDataDir(req.userId);
-    let orders = readJSON(path.join(userDir, 'purchase-orders.json'), []);
-    let filtered = orders.filter(o => o.shopId === parseInt(shopId));
-    
-    if (status) filtered = filtered.filter(o => o.status === status);
-    
-    res.json(filtered.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)));
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    try {
+        const { shopId } = req.query;
+        const userDir = getUserDataDir(req.userId);
+        const orders = readJSON(path.join(userDir, 'purchase-orders.json'), []);
+        const filtered = orders.filter(o => o.shopId === parseInt(shopId));
+        res.json(filtered);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.put('/api/purchase-orders/:id/receive', auth, checkSubscription, (req, res) => {
-  try {
-    const id = parseInt(req.params.id);
-    const userDir = getUserDataDir(req.userId);
-    let orders = readJSON(path.join(userDir, 'purchase-orders.json'), []);
-    let products = readJSON(path.join(userDir, 'products.json'), []);
-    
-    const orderIndex = orders.findIndex(o => o.id === id);
-    if (orderIndex === -1) return res.status(404).json({ error: 'Commande non trouvée' });
-    
-    const order = orders[orderIndex];
-    if (order.status === 'received') return res.status(400).json({ error: 'Commande déjà réceptionnée' });
-    
-    order.products.forEach(orderedProduct => {
-      const productIndex = products.findIndex(p => 
-        p.id === orderedProduct.productId && p.shopId === order.shopId
-      );
-      
-      if (productIndex === -1) {
-        products.push({
-          id: products.length + 1,
-          name: orderedProduct.productName,
-          quantity: orderedProduct.quantity,
-          sellingPrice: orderedProduct.unitPrice,
-          alertThreshold: 5,
-          shopId: order.shopId,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString()
+app.post('/api/purchase-orders', auth, (req, res) => {
+    try {
+        const { supplierId, products, notes, shopId } = req.body;
+        const userDir = getUserDataDir(req.userId);
+        const orders = readJSON(path.join(userDir, 'purchase-orders.json'), []);
+        const suppliers = readJSON(path.join(userDir, 'suppliers.json'), []);
+        const supplier = suppliers.find(s => s.id === supplierId);
+        
+        const total = products.reduce((sum, p) => sum + (p.unitPrice * p.quantity), 0);
+        const order = {
+            id: generateId(),
+            orderNumber: 'CMD-' + String(generateId()).slice(-6),
+            supplierId,
+            supplierName: supplier?.name || 'Inconnu',
+            products,
+            total,
+            notes: notes || '',
+            shopId,
+            status: 'pending',
+            createdAt: new Date().toISOString()
+        };
+        orders.push(order);
+        writeJSON(path.join(userDir, 'purchase-orders.json'), orders);
+        res.json(order);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.put('/api/purchase-orders/:id/receive', auth, (req, res) => {
+    try {
+        const userDir = getUserDataDir(req.userId);
+        const orders = readJSON(path.join(userDir, 'purchase-orders.json'), []);
+        const products = readJSON(path.join(userDir, 'products.json'), []);
+        const order = orders.find(o => o.id === parseInt(req.params.id));
+        if (!order) return res.status(404).json({ error: 'Commande non trouvée' });
+        
+        order.status = 'received';
+        
+        order.products.forEach(po => {
+            const product = products.find(p => p.id === po.productId && p.shopId === order.shopId);
+            if (product) {
+                product.quantity += po.quantity;
+            }
         });
-      } else {
-        products[productIndex].quantity += orderedProduct.quantity;
-        products[productIndex].updatedAt = new Date().toISOString();
-      }
-    });
-    
-    order.status = 'received';
-    order.receivedAt = new Date().toISOString();
-    order.updatedAt = new Date().toISOString();
-    
-    writeJSON(path.join(userDir, 'products.json'), products);
-    writeJSON(path.join(userDir, 'purchase-orders.json'), orders);
-    
-    addLog('purchase_order_receive', { userId: req.userId, orderId: id });
-    res.json({ message: 'Commande réceptionnée avec succès', order });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+        writeJSON(path.join(userDir, 'products.json'), products);
+        writeJSON(path.join(userDir, 'purchase-orders.json'), orders);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.put('/api/purchase-orders/:id/cancel', auth, (req, res) => {
-  try {
-    const id = parseInt(req.params.id);
-    const userDir = getUserDataDir(req.userId);
-    let orders = readJSON(path.join(userDir, 'purchase-orders.json'), []);
-    
-    const orderIndex = orders.findIndex(o => o.id === id);
-    if (orderIndex === -1) return res.status(404).json({ error: 'Commande non trouvée' });
-    
-    if (orders[orderIndex].status === 'received') {
-      return res.status(400).json({ error: 'Impossible d\'annuler une commande réceptionnée' });
+    try {
+        const userDir = getUserDataDir(req.userId);
+        const orders = readJSON(path.join(userDir, 'purchase-orders.json'), []);
+        const order = orders.find(o => o.id === parseInt(req.params.id));
+        if (!order) return res.status(404).json({ error: 'Commande non trouvée' });
+        order.status = 'cancelled';
+        writeJSON(path.join(userDir, 'purchase-orders.json'), orders);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-    
-    orders[orderIndex].status = 'cancelled';
-    orders[orderIndex].updatedAt = new Date().toISOString();
-    
-    writeJSON(path.join(userDir, 'purchase-orders.json'), orders);
-    addLog('purchase_order_cancel', { userId: req.userId, orderId: id });
-    res.json({ message: 'Commande annulée', order: orders[orderIndex] });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
 
-// ========== ROUTE WHATSAPP ==========
-app.post('/api/whatsapp/renewal', auth, (req, res) => {
-  try {
-    const { phoneNumber, userName } = req.body;
-    const user = users.find(u => u.id === req.userId);
-    const message = `Bonjour, je souhaite renouveler mon abonnement Lagrange Shop Manager. 
-Nom: ${userName || user?.fullName || 'Utilisateur'}
-Email: ${user?.email || 'Non spécifié'}
-Date: ${new Date().toLocaleDateString('fr-FR')}`;
-    
-    const encodedMessage = encodeURIComponent(message);
-    const whatsappUrl = `https://wa.me/${WHATSAPP_NUMBER}?text=${encodedMessage}`;
-    
-    res.json({ whatsappUrl, message });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ========== IA ==========
-app.post('/api/ai/ask', auth, (req, res) => {
-  try {
-    const { question, shopId } = req.body;
-    const lower = question.toLowerCase();
-    const userDir = getUserDataDir(req.userId);
-    const sales = readJSON(path.join(userDir, 'sales.json'), []);
-    const products = readJSON(path.join(userDir, 'products.json'), []);
-    const expenses = readJSON(path.join(userDir, 'expenses.json'), []);
-
-    const shopSales = sales.filter(s => s.shopId === shopId && !s.cancelled);
-    const shopProducts = products.filter(p => p.shopId === shopId);
-    const shopExpenses = expenses.filter(e => e.shopId === shopId);
-
-    let answer = '';
-
-    if ((lower.includes("aujourd'hui") || lower.includes('jour')) && (lower.includes('vente') || lower.includes('vendu'))) {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const yesterday = new Date(today);
-      yesterday.setDate(today.getDate() - 1);
-      const todayCount = shopSales.filter(s => new Date(s.date) >= today).length;
-      const yesterdayCount = shopSales.filter(s => new Date(s.date) >= yesterday && new Date(s.date) < today).length;
-      let evolution = '';
-      if (yesterdayCount > 0) {
-        const percent = ((todayCount - yesterdayCount) / yesterdayCount) * 100;
-        evolution = percent > 0 ? ` (+${percent.toFixed(1)}% par rapport a hier)` : ` (${percent.toFixed(1)}% par rapport a hier)`;
-      }
-      answer = `📊 Aujourd'hui : ${todayCount} vente(s)${evolution}.`;
-      if (yesterdayCount > 0) answer += ` Hier : ${yesterdayCount} vente(s).`;
-    } else if (lower.includes('hier') && (lower.includes('vente') || lower.includes('vendu'))) {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const yesterday = new Date(today);
-      yesterday.setDate(today.getDate() - 1);
-      const count = shopSales.filter(s => new Date(s.date) >= yesterday && new Date(s.date) < today).length;
-      answer = `📅 Hier : ${count} vente(s).`;
-    } else if (lower.includes('produit') && lower.includes('plus vendu')) {
-      const productQty = {};
-      shopSales.forEach(s => productQty[s.productId] = (productQty[s.productId] || 0) + s.quantity);
-      if (Object.keys(productQty).length === 0) answer = 'Aucune vente enregistree pour le moment.';
-      else {
-        const topId = Object.keys(productQty).reduce((a, b) => productQty[a] > productQty[b] ? a : b);
-        const product = shopProducts.find(p => p.id === parseInt(topId));
-        answer = `🏆 Le produit le plus vendu est "${product?.name || 'Inconnu'}" avec ${productQty[topId]} unites vendues.`;
-      }
-    } else if (lower.includes('meilleur vendeur') || lower.includes('top vendeur')) {
-      const sellerSalesMap = {};
-      shopSales.forEach(s => sellerSalesMap[s.sellerId] = (sellerSalesMap[s.sellerId] || 0) + s.total);
-      if (Object.keys(sellerSalesMap).length === 0) answer = 'Aucune vente enregistree pour le moment.';
-      else {
-        const topId = Object.keys(sellerSalesMap).reduce((a, b) => sellerSalesMap[a] > sellerSalesMap[b] ? a : b);
-        const seller = users.find(u => u.id === parseInt(topId));
-        answer = `🥇 Le meilleur vendeur est ${seller?.fullName || 'Inconnu'} avec ${sellerSalesMap[topId].toLocaleString()} FCFA de ventes.`;
-      }
-    } else if (lower.includes('commander') || lower.includes('stock') || lower.includes('reapprovisionner')) {
-      const low = shopProducts.filter(p => p.quantity <= p.alertThreshold);
-      if (low.length === 0) answer = '✅ Votre stock est suffisant pour tous les produits.';
-      else answer = `⚠️ Produits a reapprovisionner : ${low.map(p => `${p.name} (${p.quantity} restants)`).join(', ')}.`;
-    } else if (lower.includes('depense') || lower.includes('depenses')) {
-      const totalExpenses = shopExpenses.reduce((sum, e) => sum + e.amount, 0);
-      answer = `💰 Total des depenses : ${totalExpenses.toLocaleString()} FCFA.`;
-      if (shopExpenses.length > 0) {
-        const categories = [...new Set(shopExpenses.map(e => e.category))];
-        answer += ` Categories : ${categories.join(', ')}.`;
-      }
-    } else if (lower.includes('benefice') || lower.includes('profit')) {
-      const revenue = shopSales.reduce((sum, s) => sum + s.total, 0);
-      const totalExpenses = shopExpenses.reduce((sum, e) => sum + e.amount, 0);
-      const profit = revenue - totalExpenses;
-      answer = `📈 Votre benefice net est de ${profit.toLocaleString()} FCFA. (CA: ${revenue.toLocaleString()} FCFA - Depenses: ${totalExpenses.toLocaleString()} FCFA)`;
-    } else if (lower.includes('prediction') || lower.includes('demain')) {
-      if (shopSales.length < 7) answer = 'Pas assez de donnees pour une prediction (minimum 7 jours).';
-      else {
-        const dailyTotals = {};
-        shopSales.forEach(sale => {
-          const date = new Date(sale.date).toISOString().split('T')[0];
-          dailyTotals[date] = (dailyTotals[date] || 0) + sale.total;
+// ========== TRANSFERTS ==========
+app.post('/api/transfers', auth, (req, res) => {
+    try {
+        const { fromShopId, toShopId, productId, quantity, shopId } = req.body;
+        const userDir = getUserDataDir(req.userId);
+        const products = readJSON(path.join(userDir, 'products.json'), []);
+        const transfers = readJSON(path.join(userDir, 'transfers.json'), []);
+        const shops = readJSON(path.join(userDir, 'shops.json'), []);
+        
+        const fromProduct = products.find(p => p.id === productId && p.shopId === fromShopId);
+        if (!fromProduct) return res.status(400).json({ error: 'Produit non trouvé dans la boutique source' });
+        if (fromProduct.quantity < quantity) return res.status(400).json({ error: 'Stock insuffisant' });
+        
+        fromProduct.quantity -= quantity;
+        const toProduct = products.find(p => p.id === productId && p.shopId === toShopId);
+        if (toProduct) {
+            toProduct.quantity += quantity;
+        } else {
+            const newProduct = { ...fromProduct, id: generateId(), shopId: toShopId, quantity };
+            products.push(newProduct);
+        }
+        
+        writeJSON(path.join(userDir, 'products.json'), products);
+        
+        const fromShop = shops.find(s => s.id === fromShopId);
+        const toShop = shops.find(s => s.id === toShopId);
+        transfers.push({
+            id: generateId(),
+            fromShopId,
+            toShopId,
+            fromShopName: fromShop?.name || 'Inconnue',
+            toShopName: toShop?.name || 'Inconnue',
+            productId,
+            productName: fromProduct.name,
+            quantity,
+            date: new Date().toISOString()
         });
-        const values = Object.values(dailyTotals);
-        const last7Avg = values.slice(-7).reduce((a, b) => a + b, 0) / 7;
-        const prediction = Math.round(last7Avg * 1.05);
-        answer = `🔮 Prediction pour demain : environ ${prediction.toLocaleString()} FCFA de chiffre d'affaires.`;
-      }
-    } else {
-      answer = `🤖 Je peux repondre aux questions sur :
-- Ventes (aujourd'hui, hier)
-- Produit le plus vendu
-- Meilleur vendeur
-- Stock / Reapprovisionnement
-- Depenses
-- Benefice net
-- Prediction CA
-
-Exemple : 'Combien de ventes aujourd'hui ?'`;
+        writeJSON(path.join(userDir, 'transfers.json'), transfers);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-    res.json({ answer });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
 
-// ========== CONFIGURATION FACTURE ==========
-app.get('/api/invoice-config', auth, (req, res) => {
-  res.json(adminConfig);
+app.get('/api/transfers', auth, (req, res) => {
+    try {
+        const { shopId } = req.query;
+        const userDir = getUserDataDir(req.userId);
+        const transfers = readJSON(path.join(userDir, 'transfers.json'), []);
+        const filtered = transfers.filter(t => t.fromShopId === parseInt(shopId) || t.toShopId === parseInt(shopId));
+        res.json(filtered.sort((a, b) => new Date(b.date) - new Date(a.date)));
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.post('/api/invoice-config', auth, (req, res) => {
-  try {
-    adminConfig = { ...adminConfig, ...req.body };
-    writeJSON(path.join(DATA_DIR, 'config.json'), adminConfig);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+// ========== VENDEURS ==========
+app.post('/api/vendors', auth, (req, res) => {
+    try {
+        const { email, fullName, phone, cni, address, commission, shopId } = req.body;
+        if (users.find(u => u.email === email)) {
+            return res.status(400).json({ error: 'Email déjà utilisé' });
+        }
+        const tempPassword = Math.random().toString(36).slice(-8);
+        const newVendor = {
+            id: generateId(),
+            email,
+            password: bcrypt.hashSync(tempPassword, 10),
+            fullName,
+            phone: phone || '',
+            cni: cni || '',
+            address: address || '',
+            role: 'vendor',
+            commission: commission || 0,
+            shopId,
+            createdAt: new Date().toISOString()
+        };
+        users.push(newVendor);
+        writeJSON(usersFile, users);
+        getUserDataDir(newVendor.id);
+        res.json({ success: true, message: 'Vendeur invité avec succès', tempPassword });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/vendors', auth, (req, res) => {
+    try {
+        const { shopId } = req.query;
+        const vendors = users.filter(u => u.role === 'vendor' && u.shopId === parseInt(shopId));
+        res.json(vendors);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.delete('/api/vendors/:id', auth, (req, res) => {
+    try {
+        users = users.filter(u => u.id !== parseInt(req.params.id));
+        writeJSON(usersFile, users);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // ========== ALERTES ==========
 app.get('/api/alerts', auth, (req, res) => {
-  try {
-    const { shopId } = req.query;
-    const userDir = getUserDataDir(req.userId);
-    const alerts = readJSON(path.join(userDir, 'alerts.json'), []);
-    res.json(alerts.filter(a => a.shopId === parseInt(shopId)).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)));
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    try {
+        const { shopId } = req.query;
+        const userDir = getUserDataDir(req.userId);
+        const alerts = readJSON(path.join(userDir, 'alerts.json'), []);
+        const filtered = alerts.filter(a => a.shopId === parseInt(shopId));
+        res.json(filtered.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)));
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.put('/api/alerts/:id/read', auth, (req, res) => {
-  try {
-    const userDir = getUserDataDir(req.userId);
-    let alerts = readJSON(path.join(userDir, 'alerts.json'), []);
-    const index = alerts.findIndex(a => a.id === parseInt(req.params.id));
-    if (index !== -1) alerts[index].read = true;
-    writeJSON(path.join(userDir, 'alerts.json'), alerts);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    try {
+        const userDir = getUserDataDir(req.userId);
+        let alerts = readJSON(path.join(userDir, 'alerts.json'), []);
+        const index = alerts.findIndex(a => a.id === parseInt(req.params.id));
+        if (index !== -1) alerts[index].read = true;
+        writeJSON(path.join(userDir, 'alerts.json'), alerts);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ========== DASHBOARD ==========
+app.get('/api/dashboard/stats', auth, (req, res) => {
+    try {
+        const { shopId } = req.query;
+        const userDir = getUserDataDir(req.userId);
+        const sales = readJSON(path.join(userDir, 'sales.json'), []);
+        const products = readJSON(path.join(userDir, 'products.json'), []);
+        const expenses = readJSON(path.join(userDir, 'expenses.json'), []);
+        
+        const shopSales = sales.filter(s => s.shopId === parseInt(shopId) && !s.cancelled);
+        const shopProducts = products.filter(p => p.shopId === parseInt(shopId));
+        const shopExpenses = expenses.filter(e => e.shopId === parseInt(shopId));
+        
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const yesterday = new Date(today);
+        yesterday.setDate(today.getDate() - 1);
+        
+        const dailySales = shopSales.filter(s => new Date(s.date) >= today).length;
+        const yesterdaySales = shopSales.filter(s => new Date(s.date) >= yesterday && new Date(s.date) < today).length;
+        const weeklySales = shopSales.filter(s => new Date(s.date) >= new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000)).length;
+        const monthlySales = shopSales.filter(s => new Date(s.date).getMonth() === today.getMonth()).length;
+        
+        const revenue = shopSales.reduce((sum, s) => sum + s.total, 0);
+        const totalExpenses = shopExpenses.reduce((sum, e) => sum + e.amount, 0);
+        const netProfit = revenue - totalExpenses;
+        
+        const lowStock = shopProducts.filter(p => p.quantity <= p.alertThreshold && p.quantity > 0).length;
+        const outOfStock = shopProducts.filter(p => p.quantity === 0).length;
+        
+        const salesEvolution = yesterdaySales > 0 ? ((dailySales - yesterdaySales) / yesterdaySales * 100) : 0;
+        
+        const dailyChart = [];
+        for (let i = 6; i >= 0; i--) {
+            const d = new Date(today);
+            d.setDate(d.getDate() - i);
+            const count = shopSales.filter(s => new Date(s.date).toDateString() === d.toDateString()).length;
+            dailyChart.push({ date: d.toLocaleDateString('fr-FR', { weekday: 'short' }), count });
+        }
+        
+        const productQty = {};
+        shopSales.forEach(s => productQty[s.productId] = (productQty[s.productId] || 0) + s.quantity);
+        const topProducts = Object.entries(productQty)
+            .map(([id, qty]) => ({ id: parseInt(id), quantitySold: qty }))
+            .sort((a, b) => b.quantitySold - a.quantitySold)
+            .slice(0, 5)
+            .map(p => ({ ...p, name: shopProducts.find(pr => pr.id === p.id)?.name || 'Inconnu' }));
+        
+        const sellerRevenue = {};
+        shopSales.forEach(s => sellerRevenue[s.sellerId] = (sellerRevenue[s.sellerId] || 0) + s.total);
+        const topSellers = Object.entries(sellerRevenue)
+            .map(([id, rev]) => ({ id: parseInt(id), revenue: rev }))
+            .sort((a, b) => b.revenue - a.revenue)
+            .slice(0, 5)
+            .map(s => ({ ...s, name: users.find(u => u.id === s.id)?.fullName || 'Inconnu' }));
+        
+        res.json({
+            dailySales,
+            yesterdaySales,
+            weeklySales,
+            monthlySales,
+            revenue,
+            totalExpenses,
+            netProfit,
+            lowStockCount: lowStock,
+            outOfStockCount: outOfStock,
+            salesEvolution,
+            dailyChart,
+            topProducts,
+            topSellers
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/dashboard/advanced-stats', auth, (req, res) => {
+    try {
+        const { shopId } = req.query;
+        const userDir = getUserDataDir(req.userId);
+        const sales = readJSON(path.join(userDir, 'sales.json'), []);
+        const products = readJSON(path.join(userDir, 'products.json'), []);
+        const expenses = readJSON(path.join(userDir, 'expenses.json'), []);
+        
+        const shopSales = sales.filter(s => s.shopId === parseInt(shopId) && !s.cancelled);
+        const shopProducts = products.filter(p => p.shopId === parseInt(shopId));
+        const shopExpenses = expenses.filter(e => e.shopId === parseInt(shopId));
+        
+        const totalSalesCount = shopSales.length;
+        const totalRevenue = shopSales.reduce((sum, s) => sum + s.total, 0);
+        const averageCart = totalSalesCount > 0 ? totalRevenue / totalSalesCount : 0;
+        const conversionRate = Math.min(100, Math.round((totalSalesCount / (totalSalesCount + 10)) * 100));
+        
+        const productProfit = {};
+        shopSales.forEach(s => {
+            const cost = shopProducts.find(p => p.id === s.productId)?.costPrice || s.unitPrice * 0.7;
+            const profit = s.total - (cost * s.quantity);
+            productProfit[s.productId] = (productProfit[s.productId] || 0) + profit;
+        });
+        let mostProfitableProduct = null;
+        let maxProfit = 0;
+        Object.entries(productProfit).forEach(([id, profit]) => {
+            if (profit > maxProfit) {
+                maxProfit = profit;
+                const p = shopProducts.find(pr => pr.id === parseInt(id));
+                mostProfitableProduct = { name: p?.name || 'Inconnu', profit };
+            }
+        });
+        
+        const monthlySales = {};
+        shopSales.forEach(s => {
+            const month = new Date(s.date).toLocaleString('fr-FR', { month: 'long' });
+            monthlySales[month] = (monthlySales[month] || 0) + s.total;
+        });
+        
+        const monthlyTarget = 1000000;
+        const currentMonthRevenue = shopSales.filter(s => new Date(s.date).getMonth() === new Date().getMonth())
+            .reduce((sum, s) => sum + s.total, 0);
+        const targetProgress = Math.min(100, Math.round((currentMonthRevenue / monthlyTarget) * 100));
+        
+        res.json({
+            averageCart,
+            conversionRate,
+            mostProfitableProduct,
+            monthlySales,
+            monthlyTarget,
+            currentMonthRevenue,
+            targetProgress
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/dashboard/payment-stats', auth, (req, res) => {
+    try {
+        const { shopId } = req.query;
+        const userDir = getUserDataDir(req.userId);
+        const sales = readJSON(path.join(userDir, 'sales.json'), []);
+        const shopSales = sales.filter(s => s.shopId === parseInt(shopId) && !s.cancelled);
+        
+        const paymentStats = {};
+        shopSales.forEach(s => {
+            const method = s.paymentMethod || 'cash';
+            paymentStats[method] = (paymentStats[method] || 0) + s.total;
+        });
+        res.json(paymentStats);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ========== IA ==========
+app.post('/api/ai/ask', auth, (req, res) => {
+    try {
+        const { question, shopId } = req.body;
+        const lower = question.toLowerCase();
+        const userDir = getUserDataDir(req.userId);
+        const sales = readJSON(path.join(userDir, 'sales.json'), []);
+        const products = readJSON(path.join(userDir, 'products.json'), []);
+        const expenses = readJSON(path.join(userDir, 'expenses.json'), []);
+        
+        const shopSales = sales.filter(s => s.shopId === shopId && !s.cancelled);
+        const shopProducts = products.filter(p => p.shopId === shopId);
+        const shopExpenses = expenses.filter(e => e.shopId === shopId);
+        
+        let answer = '';
+        
+        if ((lower.includes('aujourd') || lower.includes('jour')) && (lower.includes('vente') || lower.includes('vendu'))) {
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            const yesterday = new Date(today);
+            yesterday.setDate(today.getDate() - 1);
+            const todayCount = shopSales.filter(s => new Date(s.date) >= today).length;
+            const yesterdayCount = shopSales.filter(s => new Date(s.date) >= yesterday && new Date(s.date) < today).length;
+            answer = "Aujourd'hui : " + todayCount + " vente(s). Hier : " + yesterdayCount + " vente(s).";
+        } else if (lower.includes('hier') && (lower.includes('vente') || lower.includes('vendu'))) {
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            const yesterday = new Date(today);
+            yesterday.setDate(today.getDate() - 1);
+            const count = shopSales.filter(s => new Date(s.date) >= yesterday && new Date(s.date) < today).length;
+            answer = "Hier : " + count + " vente(s).";
+        } else if (lower.includes('produit') && lower.includes('plus vendu')) {
+            const productQty = {};
+            shopSales.forEach(s => productQty[s.productId] = (productQty[s.productId] || 0) + s.quantity);
+            if (Object.keys(productQty).length === 0) answer = 'Aucune vente enregistree.';
+            else {
+                const topId = Object.keys(productQty).reduce((a, b) => productQty[a] > productQty[b] ? a : b);
+                const product = shopProducts.find(p => p.id === parseInt(topId));
+                answer = "Produit le plus vendu : " + (product?.name || 'Inconnu') + " (" + productQty[topId] + " unites).";
+            }
+        } else if (lower.includes('meilleur vendeur') || lower.includes('top vendeur')) {
+            const sellerSalesMap = {};
+            shopSales.forEach(s => sellerSalesMap[s.sellerId] = (sellerSalesMap[s.sellerId] || 0) + s.total);
+            if (Object.keys(sellerSalesMap).length === 0) answer = 'Aucune vente enregistree.';
+            else {
+                const topId = Object.keys(sellerSalesMap).reduce((a, b) => sellerSalesMap[a] > sellerSalesMap[b] ? a : b);
+                const seller = users.find(u => u.id === parseInt(topId));
+                answer = "Meilleur vendeur : " + (seller?.fullName || 'Inconnu') + " (" + sellerSalesMap[topId].toLocaleString() + " FCFA).";
+            }
+        } else if (lower.includes('commander') || lower.includes('stock') || lower.includes('reapprovisionner')) {
+            const low = shopProducts.filter(p => p.quantity <= p.alertThreshold);
+            if (low.length === 0) answer = 'Stock suffisant pour tous les produits.';
+            else answer = "Produits a reapprovisionner : " + low.map(p => p.name + " (" + p.quantity + " restants)").join(', ');
+        } else if (lower.includes('depense') || lower.includes('depenses')) {
+            const totalExpenses = shopExpenses.reduce((sum, e) => sum + e.amount, 0);
+            answer = "Total des depenses : " + totalExpenses.toLocaleString() + " FCFA.";
+        } else if (lower.includes('benefice') || lower.includes('profit')) {
+            const revenue = shopSales.reduce((sum, s) => sum + s.total, 0);
+            const totalExpenses = shopExpenses.reduce((sum, e) => sum + e.amount, 0);
+            const profit = revenue - totalExpenses;
+            answer = "Benefice net : " + profit.toLocaleString() + " FCFA (CA: " + revenue.toLocaleString() + " FCFA - Depenses: " + totalExpenses.toLocaleString() + " FCFA)";
+        } else if (lower.includes('prediction') || lower.includes('demain')) {
+            if (shopSales.length < 7) answer = 'Pas assez de donnees (minimum 7 jours).';
+            else {
+                const dailyTotals = {};
+                shopSales.forEach(sale => {
+                    const date = new Date(sale.date).toISOString().split('T')[0];
+                    dailyTotals[date] = (dailyTotals[date] || 0) + sale.total;
+                });
+                const values = Object.values(dailyTotals);
+                const last7Avg = values.slice(-7).reduce((a, b) => a + b, 0) / 7;
+                const prediction = Math.round(last7Avg * 1.05);
+                answer = "Prediction demain : ~" + prediction.toLocaleString() + " FCFA.";
+            }
+        } else {
+            answer = "Je reponds aux questions sur : Ventes (aujourd'hui, hier), Produit plus vendu, Meilleur vendeur, Stock, Depenses, Benefice, Prediction. Ex: 'Combien de ventes aujourd'hui ?'";
+        }
+        
+        res.json({ answer });
+    } catch (err) {
+        console.error('Erreur IA:', err);
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // ========== EXPORT ==========
 app.get('/api/export/sales', auth, async (req, res) => {
-  try {
-    const { shopId, format = 'csv' } = req.query;
-    const userDir = getUserDataDir(req.userId);
-    const sales = readJSON(path.join(userDir, 'sales.json'), []);
-    const shopSales = sales.filter(s => s.shopId === parseInt(shopId) && !s.cancelled);
-
-    const workbook = new ExcelJS.Workbook();
-    const worksheet = workbook.addWorksheet('Ventes');
-    worksheet.columns = [
-      { header: 'Date', key: 'date', width: 20 },
-      { header: 'Produit', key: 'product', width: 20 },
-      { header: 'Client', key: 'customer', width: 20 },
-      { header: 'Vendeur', key: 'seller', width: 20 },
-      { header: 'Quantite', key: 'quantity', width: 10 },
-      { header: 'Prix unitaire', key: 'unitPrice', width: 15 },
-      { header: 'Total', key: 'total', width: 15 },
-      { header: 'Moyen paiement', key: 'paymentMethod', width: 15 }
-    ];
-    shopSales.forEach(s => worksheet.addRow({
-      date: new Date(s.date).toLocaleDateString('fr-FR'),
-      product: s.productName,
-      customer: s.customerName,
-      seller: s.sellerName,
-      quantity: s.quantity,
-      unitPrice: s.unitPrice,
-      total: s.total,
-      paymentMethod: s.paymentMethod || 'cash'
-    }));
-
-    if (format === 'csv') {
-      res.setHeader('Content-Type', 'text/csv');
-      res.setHeader('Content-Disposition', 'attachment; filename=ventes.csv');
-      await workbook.csv.write(res);
-    } else {
-      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-      res.setHeader('Content-Disposition', 'attachment; filename=ventes.xlsx');
-      await workbook.xlsx.write(res);
+    try {
+        const { shopId, format = 'csv' } = req.query;
+        const userDir = getUserDataDir(req.userId);
+        const sales = readJSON(path.join(userDir, 'sales.json'), []);
+        const shopSales = sales.filter(s => s.shopId === parseInt(shopId) && !s.cancelled);
+        const workbook = new ExcelJS.Workbook();
+        const worksheet = workbook.addWorksheet('Ventes');
+        worksheet.columns = [
+            { header: 'Date', key: 'date', width: 20 },
+            { header: 'Produit', key: 'product', width: 20 },
+            { header: 'Client', key: 'customer', width: 20 },
+            { header: 'Vendeur', key: 'seller', width: 20 },
+            { header: 'Quantite', key: 'quantity', width: 10 },
+            { header: 'Prix unitaire', key: 'unitPrice', width: 15 },
+            { header: 'Total', key: 'total', width: 15 },
+            { header: 'Moyen paiement', key: 'paymentMethod', width: 15 }
+        ];
+        shopSales.forEach(s => worksheet.addRow({
+            date: new Date(s.date).toLocaleDateString('fr-FR'),
+            product: s.productName,
+            customer: s.customerName,
+            seller: s.sellerName,
+            quantity: s.quantity,
+            unitPrice: s.unitPrice,
+            total: s.total,
+            paymentMethod: s.paymentMethod || 'cash'
+        }));
+        if (format === 'csv') {
+            res.setHeader('Content-Type', 'text/csv');
+            res.setHeader('Content-Disposition', 'attachment; filename=ventes.csv');
+            await workbook.csv.write(res);
+        } else {
+            res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+            res.setHeader('Content-Disposition', 'attachment; filename=ventes.xlsx');
+            await workbook.xlsx.write(res);
+        }
+        res.end();
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-    res.end();
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
 
 app.get('/api/export/products', auth, async (req, res) => {
-  try {
-    const { shopId, format = 'csv' } = req.query;
-    const userDir = getUserDataDir(req.userId);
-    const products = readJSON(path.join(userDir, 'products.json'), []);
-    const shopProducts = products.filter(p => p.shopId === parseInt(shopId));
-
-    const workbook = new ExcelJS.Workbook();
-    const worksheet = workbook.addWorksheet('Produits');
-    worksheet.columns = [
-      { header: 'Nom', key: 'name', width: 20 },
-      { header: 'Stock', key: 'quantity', width: 10 },
-      { header: 'Prix vente', key: 'sellingPrice', width: 15 },
-      { header: 'Seuil alerte', key: 'alertThreshold', width: 12 },
-      { header: 'Date péremption', key: 'expiryDate', width: 15 }
-    ];
-    shopProducts.forEach(p => worksheet.addRow({
-      name: p.name,
-      quantity: p.quantity,
-      sellingPrice: p.sellingPrice,
-      alertThreshold: p.alertThreshold,
-      expiryDate: p.expiryDate || '-'
-    }));
-
-    if (format === 'csv') {
-      res.setHeader('Content-Type', 'text/csv');
-      res.setHeader('Content-Disposition', 'attachment; filename=produits.csv');
-      await workbook.csv.write(res);
-    } else {
-      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-      res.setHeader('Content-Disposition', 'attachment; filename=produits.xlsx');
-      await workbook.xlsx.write(res);
+    try {
+        const { shopId, format = 'csv' } = req.query;
+        const userDir = getUserDataDir(req.userId);
+        const products = readJSON(path.join(userDir, 'products.json'), []);
+        const shopProducts = products.filter(p => p.shopId === parseInt(shopId));
+        const workbook = new ExcelJS.Workbook();
+        const worksheet = workbook.addWorksheet('Produits');
+        worksheet.columns = [
+            { header: 'Nom', key: 'name', width: 20 },
+            { header: 'Stock', key: 'quantity', width: 10 },
+            { header: 'Prix vente', key: 'sellingPrice', width: 15 },
+            { header: 'Seuil alerte', key: 'alertThreshold', width: 12 },
+            { header: 'Date peremption', key: 'expiryDate', width: 15 }
+        ];
+        shopProducts.forEach(p => worksheet.addRow({
+            name: p.name,
+            quantity: p.quantity,
+            sellingPrice: p.sellingPrice,
+            alertThreshold: p.alertThreshold,
+            expiryDate: p.expiryDate || '-'
+        }));
+        if (format === 'csv') {
+            res.setHeader('Content-Type', 'text/csv');
+            res.setHeader('Content-Disposition', 'attachment; filename=produits.csv');
+            await workbook.csv.write(res);
+        } else {
+            res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+            res.setHeader('Content-Disposition', 'attachment; filename=produits.xlsx');
+            await workbook.xlsx.write(res);
+        }
+        res.end();
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-    res.end();
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
 
 app.get('/api/export/expenses', auth, async (req, res) => {
-  try {
-    const { shopId, format = 'csv' } = req.query;
-    const userDir = getUserDataDir(req.userId);
-    const expenses = readJSON(path.join(userDir, 'expenses.json'), []);
-    const shopExpenses = expenses.filter(e => e.shopId === parseInt(shopId));
-
-    const workbook = new ExcelJS.Workbook();
-    const worksheet = workbook.addWorksheet('Depenses');
-    worksheet.columns = [
-      { header: 'Date', key: 'date', width: 20 },
-      { header: 'Categorie', key: 'category', width: 20 },
-      { header: 'Montant', key: 'amount', width: 15 },
-      { header: 'Description', key: 'description', width: 30 }
-    ];
-    shopExpenses.forEach(e => worksheet.addRow({
-      date: new Date(e.date).toLocaleDateString('fr-FR'),
-      category: e.category,
-      amount: e.amount,
-      description: e.description
-    }));
-
-    if (format === 'csv') {
-      res.setHeader('Content-Type', 'text/csv');
-      res.setHeader('Content-Disposition', 'attachment; filename=depenses.csv');
-      await workbook.csv.write(res);
-    } else {
-      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-      res.setHeader('Content-Disposition', 'attachment; filename=depenses.xlsx');
-      await workbook.xlsx.write(res);
+    try {
+        const { shopId, format = 'csv' } = req.query;
+        const userDir = getUserDataDir(req.userId);
+        const expenses = readJSON(path.join(userDir, 'expenses.json'), []);
+        const shopExpenses = expenses.filter(e => e.shopId === parseInt(shopId));
+        const workbook = new ExcelJS.Workbook();
+        const worksheet = workbook.addWorksheet('Depenses');
+        worksheet.columns = [
+            { header: 'Date', key: 'date', width: 20 },
+            { header: 'Categorie', key: 'category', width: 20 },
+            { header: 'Montant', key: 'amount', width: 15 },
+            { header: 'Description', key: 'description', width: 30 }
+        ];
+        shopExpenses.forEach(e => worksheet.addRow({
+            date: new Date(e.date).toLocaleDateString('fr-FR'),
+            category: e.category,
+            amount: e.amount,
+            description: e.description
+        }));
+        if (format === 'csv') {
+            res.setHeader('Content-Type', 'text/csv');
+            res.setHeader('Content-Disposition', 'attachment; filename=depenses.csv');
+            await workbook.csv.write(res);
+        } else {
+            res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+            res.setHeader('Content-Disposition', 'attachment; filename=depenses.xlsx');
+            await workbook.xlsx.write(res);
+        }
+        res.end();
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-    res.end();
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
 });
 
-// ========== LOGS ==========
-app.get('/api/logs', auth, (req, res) => {
-  try {
-    const { limit = 100 } = req.query;
-    res.json(logs.slice(-parseInt(limit)));
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ========== SANTÉ ==========
-app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'OK',
-    users: users.length,
-    logs: logs.length,
-    notifications: notifications.length,
-    uptime: process.uptime(),
-    memory: process.memoryUsage()
-  });
-});
-
-// ========== EXPORT ZIP DES DONNÉES UTILISATEUR ==========
 app.get('/api/export/user-data', auth, (req, res) => {
-  try {
-    const userDir = getUserDataDir(req.userId);
-    const archive = archiver('zip', { zlib: { level: 9 } });
-    res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename=donnees_${req.userId}_${new Date().toISOString().split('T')[0]}.zip`);
-    archive.pipe(res);
-    archive.directory(userDir, false);
-    archive.finalize();
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    try {
+        const userDir = getUserDataDir(req.userId);
+        const archive = archiver('zip', { zlib: { level: 9 } });
+        res.setHeader('Content-Type', 'application/zip');
+        res.setHeader('Content-Disposition', 'attachment; filename=donnees_' + req.userId + '_' + new Date().toISOString().split('T')[0] + '.zip');
+        archive.pipe(res);
+        archive.directory(userDir, false);
+        archive.finalize();
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ========== CONFIG FACTURE ==========
+let adminConfig = readJSON(path.join(DATA_DIR, 'config.json'), {
+    companyName: 'Lagrange Shop',
+    address: 'Votre adresse',
+    phone: 'Votre téléphone',
+    email: 'contact@lagrange.com',
+    taxRate: 0,
+    currency: 'FCFA'
+});
+
+app.get('/api/invoice-config', auth, (req, res) => {
+    res.json(adminConfig);
+});
+
+app.post('/api/invoice-config', auth, (req, res) => {
+    try {
+        adminConfig = { ...adminConfig, ...req.body };
+        writeJSON(path.join(DATA_DIR, 'config.json'), adminConfig);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ========== ROUTES STATIQUES ==========
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+app.get('/auth.html', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'auth.html'));
+});
+
+app.use(express.static(path.join(__dirname, 'public')));
+
+// ========== SANTE ==========
+app.get('/api/health', (req, res) => {
+    res.json({
+        status: 'OK',
+        users: users.length,
+        uptime: process.uptime(),
+        memory: process.memoryUsage()
+    });
 });
 
 // ========== DÉMARRAGE ==========
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n🚀 Lagrange Shop Manager v3.0`);
-  console.log(`📍 http://localhost:${PORT}`);
-  console.log(`🔐 Connexion : http://localhost:${PORT}/auth.html`);
-  console.log(`📁 Données admin : ${DATA_DIR}`);
-  console.log(`📁 Données utilisateur : ${USER_DATA_ROOT}`);
-  console.log(`✅ Serveur prêt !\n`);
+    console.log('\n🚀 Lagrange Shop Manager v3.0');
+    console.log('📍 http://localhost:' + PORT);
+    console.log('🔐 Connexion : http://localhost:' + PORT + '/auth.html');
+    console.log('📁 Données admin : ' + DATA_DIR);
+    console.log('📁 Données utilisateur : ' + USER_DATA_ROOT);
+    console.log('✅ Serveur prêt !\n');
 });
+
+module.exports = app;

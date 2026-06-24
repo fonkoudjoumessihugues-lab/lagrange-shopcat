@@ -1,7 +1,7 @@
 node_modules/
 data/
 user-data/
-.env.local
+.env
 *.log
 .DS_Store
-*.backup
+*.tmp
