@@ -131,7 +131,8 @@ app.post('/api/auth/login', (req, res) => {
     }
 });
 
-app.post('/api/auth/register', adminAuth, (req, res) => {
+// ========== INSCRIPTION PUBLIQUE (CORRIGÉE) ==========
+app.post('/api/auth/register', (req, res) => {
     try {
         const { email, password, fullName, role = 'user' } = req.body;
         if (users.find(u => u.email === email)) {
@@ -142,14 +143,22 @@ app.post('/api/auth/register', adminAuth, (req, res) => {
             email,
             password: bcrypt.hashSync(password, 10),
             fullName,
-            role,
+            role: role || 'user',
             createdAt: new Date().toISOString()
         };
         users.push(newUser);
         writeJSON(usersFile, users);
         getUserDataDir(newUser.id);
+
+        const token = jwt.sign(
+            { id: newUser.id, email: newUser.email, role: newUser.role },
+            JWT_SECRET,
+            { expiresIn: '7d' }
+        );
+
         res.json({
             success: true,
+            token,
             user: {
                 id: newUser.id,
                 email: newUser.email,
@@ -172,6 +181,74 @@ app.get('/api/auth/me', auth, (req, res) => {
             fullName: user.fullName,
             role: user.role
         });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ========== ADMIN - GESTION DES UTILISATEURS ==========
+app.get('/api/admin/users', adminAuth, (req, res) => {
+    try {
+        const safeUsers = users.map(u => ({
+            id: u.id,
+            email: u.email,
+            fullName: u.fullName,
+            role: u.role,
+            createdAt: u.createdAt
+        }));
+        res.json(safeUsers);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/admin/users', adminAuth, (req, res) => {
+    try {
+        const { email, password, fullName, role = 'user' } = req.body;
+        if (users.find(u => u.email === email)) {
+            return res.status(400).json({ error: 'Email déjà utilisé' });
+        }
+        const newUser = {
+            id: generateId(),
+            email,
+            password: bcrypt.hashSync(password, 10),
+            fullName,
+            role: role || 'user',
+            createdAt: new Date().toISOString()
+        };
+        users.push(newUser);
+        writeJSON(usersFile, users);
+        getUserDataDir(newUser.id);
+        res.json({ success: true, user: { id: newUser.id, email: newUser.email, fullName: newUser.fullName, role: newUser.role } });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.delete('/api/admin/users/:id', adminAuth, (req, res) => {
+    try {
+        const userId = parseInt(req.params.id);
+        if (userId === 1) {
+            return res.status(400).json({ error: 'Impossible de supprimer l\'administrateur principal' });
+        }
+        users = users.filter(u => u.id !== userId);
+        writeJSON(usersFile, users);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.put('/api/admin/users/:id', adminAuth, (req, res) => {
+    try {
+        const userId = parseInt(req.params.id);
+        const { fullName, role } = req.body;
+        const user = users.find(u => u.id === userId);
+        if (!user) return res.status(404).json({ error: 'Utilisateur non trouvé' });
+        if (fullName) user.fullName = fullName;
+        if (role) user.role = role;
+        writeJSON(usersFile, users);
+        res.json({ success: true, user });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -252,7 +329,7 @@ app.post('/api/products', auth, (req, res) => {
         };
         products.push(newProduct);
         writeJSON(path.join(userDir, 'products.json'), products);
-        
+
         if (newProduct.quantity <= newProduct.alertThreshold) {
             const alerts = readJSON(path.join(userDir, 'alerts.json'), []);
             alerts.push({
@@ -266,7 +343,7 @@ app.post('/api/products', auth, (req, res) => {
             });
             writeJSON(path.join(userDir, 'alerts.json'), alerts);
         }
-        
+
         res.json(newProduct);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -338,17 +415,17 @@ app.post('/api/sales', auth, (req, res) => {
         const userDir = getUserDataDir(req.userId);
         const products = readJSON(path.join(userDir, 'products.json'), []);
         const sales = readJSON(path.join(userDir, 'sales.json'), []);
-        
+
         const product = products.find(p => p.id === productId && p.shopId === shopId);
         if (!product) return res.status(404).json({ error: 'Produit non trouvé' });
         if (product.quantity < quantity) return res.status(400).json({ error: 'Stock insuffisant' });
-        
+
         const unitPrice = customPrice || product.sellingPrice;
         const total = unitPrice * quantity;
-        
+
         product.quantity -= quantity;
         writeJSON(path.join(userDir, 'products.json'), products);
-        
+
         const sale = {
             id: generateId(),
             productId,
@@ -366,7 +443,7 @@ app.post('/api/sales', auth, (req, res) => {
         };
         sales.push(sale);
         writeJSON(path.join(userDir, 'sales.json'), sales);
-        
+
         const invoices = readJSON(path.join(userDir, 'invoices.json'), []);
         const invoiceNumber = 'INV-' + String(generateId()).slice(-6);
         const invoice = {
@@ -379,7 +456,7 @@ app.post('/api/sales', auth, (req, res) => {
         };
         invoices.push(invoice);
         writeJSON(path.join(userDir, 'invoices.json'), invoices);
-        
+
         if (product.quantity <= product.alertThreshold) {
             const alerts = readJSON(path.join(userDir, 'alerts.json'), []);
             alerts.push({
@@ -393,13 +470,13 @@ app.post('/api/sales', auth, (req, res) => {
             });
             writeJSON(path.join(userDir, 'alerts.json'), alerts);
         }
-        
+
         let perfMessage = '';
         const totalSalesToday = sales.filter(s => new Date(s.date).toDateString() === new Date().toDateString()).length;
         if (totalSalesToday >= 10) perfMessage = '🎉 Excellent ! Déjà ' + totalSalesToday + ' ventes aujourd\'hui !';
         else if (totalSalesToday >= 5) perfMessage = '💪 Bonne journée ! ' + totalSalesToday + ' ventes déjà.';
         else if (totalSalesToday >= 3) perfMessage = '👍 Pas mal, continuez !';
-        
+
         res.json({ success: true, sale, performanceMessage: perfMessage });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -425,14 +502,14 @@ app.post('/api/sales/:id/cancel', auth, (req, res) => {
         const sale = sales.find(s => s.id === parseInt(req.params.id));
         if (!sale) return res.status(404).json({ error: 'Vente non trouvée' });
         if (sale.cancelled) return res.status(400).json({ error: 'Vente déjà annulée' });
-        
+
         const saleDate = new Date(sale.date);
         const now = new Date();
         const diffMinutes = (now - saleDate) / 60000;
         if (req.userRole !== 'admin' && req.userRole !== 'super_admin' && diffMinutes > 15) {
             return res.status(400).json({ error: 'Délai de 15 minutes dépassé' });
         }
-        
+
         sale.cancelled = true;
         writeJSON(path.join(userDir, 'sales.json'), sales);
         res.json({ success: true });
@@ -460,12 +537,12 @@ app.get('/api/invoices/:saleId/pdf', auth, (req, res) => {
         const invoices = readJSON(path.join(userDir, 'invoices.json'), []);
         const invoice = invoices.find(i => i.saleId === parseInt(req.params.saleId));
         if (!invoice) return res.status(404).json({ error: 'Facture non trouvée' });
-        
+
         const doc = new PDFDocument();
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', 'attachment; filename=facture_' + invoice.invoiceNumber + '.pdf');
         doc.pipe(res);
-        
+
         const config = readJSON(path.join(DATA_DIR, 'config.json'), {
             companyName: 'Lagrange Shop',
             address: 'Votre adresse',
@@ -473,7 +550,7 @@ app.get('/api/invoices/:saleId/pdf', auth, (req, res) => {
             email: 'contact@lagrange.com',
             taxRate: 0
         });
-        
+
         doc.fontSize(18).text(config.companyName, { align: 'center' });
         doc.fontSize(10).text(config.address, { align: 'center' });
         doc.fontSize(10).text('Tél: ' + config.phone + ' | Email: ' + config.email, { align: 'center' });
@@ -609,7 +686,7 @@ app.post('/api/purchase-orders', auth, (req, res) => {
         const orders = readJSON(path.join(userDir, 'purchase-orders.json'), []);
         const suppliers = readJSON(path.join(userDir, 'suppliers.json'), []);
         const supplier = suppliers.find(s => s.id === supplierId);
-        
+
         const total = products.reduce((sum, p) => sum + (p.unitPrice * p.quantity), 0);
         const order = {
             id: generateId(),
@@ -638,9 +715,9 @@ app.put('/api/purchase-orders/:id/receive', auth, (req, res) => {
         const products = readJSON(path.join(userDir, 'products.json'), []);
         const order = orders.find(o => o.id === parseInt(req.params.id));
         if (!order) return res.status(404).json({ error: 'Commande non trouvée' });
-        
+
         order.status = 'received';
-        
+
         order.products.forEach(po => {
             const product = products.find(p => p.id === po.productId && p.shopId === order.shopId);
             if (product) {
@@ -677,11 +754,11 @@ app.post('/api/transfers', auth, (req, res) => {
         const products = readJSON(path.join(userDir, 'products.json'), []);
         const transfers = readJSON(path.join(userDir, 'transfers.json'), []);
         const shops = readJSON(path.join(userDir, 'shops.json'), []);
-        
+
         const fromProduct = products.find(p => p.id === productId && p.shopId === fromShopId);
         if (!fromProduct) return res.status(400).json({ error: 'Produit non trouvé dans la boutique source' });
         if (fromProduct.quantity < quantity) return res.status(400).json({ error: 'Stock insuffisant' });
-        
+
         fromProduct.quantity -= quantity;
         const toProduct = products.find(p => p.id === productId && p.shopId === toShopId);
         if (toProduct) {
@@ -690,9 +767,9 @@ app.post('/api/transfers', auth, (req, res) => {
             const newProduct = { ...fromProduct, id: generateId(), shopId: toShopId, quantity };
             products.push(newProduct);
         }
-        
+
         writeJSON(path.join(userDir, 'products.json'), products);
-        
+
         const fromShop = shops.find(s => s.id === fromShopId);
         const toShop = shops.find(s => s.id === toShopId);
         transfers.push({
@@ -809,30 +886,30 @@ app.get('/api/dashboard/stats', auth, (req, res) => {
         const sales = readJSON(path.join(userDir, 'sales.json'), []);
         const products = readJSON(path.join(userDir, 'products.json'), []);
         const expenses = readJSON(path.join(userDir, 'expenses.json'), []);
-        
+
         const shopSales = sales.filter(s => s.shopId === parseInt(shopId) && !s.cancelled);
         const shopProducts = products.filter(p => p.shopId === parseInt(shopId));
         const shopExpenses = expenses.filter(e => e.shopId === parseInt(shopId));
-        
+
         const today = new Date();
         today.setHours(0, 0, 0, 0);
         const yesterday = new Date(today);
         yesterday.setDate(today.getDate() - 1);
-        
+
         const dailySales = shopSales.filter(s => new Date(s.date) >= today).length;
         const yesterdaySales = shopSales.filter(s => new Date(s.date) >= yesterday && new Date(s.date) < today).length;
         const weeklySales = shopSales.filter(s => new Date(s.date) >= new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000)).length;
         const monthlySales = shopSales.filter(s => new Date(s.date).getMonth() === today.getMonth()).length;
-        
+
         const revenue = shopSales.reduce((sum, s) => sum + s.total, 0);
         const totalExpenses = shopExpenses.reduce((sum, e) => sum + e.amount, 0);
         const netProfit = revenue - totalExpenses;
-        
+
         const lowStock = shopProducts.filter(p => p.quantity <= p.alertThreshold && p.quantity > 0).length;
         const outOfStock = shopProducts.filter(p => p.quantity === 0).length;
-        
+
         const salesEvolution = yesterdaySales > 0 ? ((dailySales - yesterdaySales) / yesterdaySales * 100) : 0;
-        
+
         const dailyChart = [];
         for (let i = 6; i >= 0; i--) {
             const d = new Date(today);
@@ -840,7 +917,7 @@ app.get('/api/dashboard/stats', auth, (req, res) => {
             const count = shopSales.filter(s => new Date(s.date).toDateString() === d.toDateString()).length;
             dailyChart.push({ date: d.toLocaleDateString('fr-FR', { weekday: 'short' }), count });
         }
-        
+
         const productQty = {};
         shopSales.forEach(s => productQty[s.productId] = (productQty[s.productId] || 0) + s.quantity);
         const topProducts = Object.entries(productQty)
@@ -848,7 +925,7 @@ app.get('/api/dashboard/stats', auth, (req, res) => {
             .sort((a, b) => b.quantitySold - a.quantitySold)
             .slice(0, 5)
             .map(p => ({ ...p, name: shopProducts.find(pr => pr.id === p.id)?.name || 'Inconnu' }));
-        
+
         const sellerRevenue = {};
         shopSales.forEach(s => sellerRevenue[s.sellerId] = (sellerRevenue[s.sellerId] || 0) + s.total);
         const topSellers = Object.entries(sellerRevenue)
@@ -856,7 +933,7 @@ app.get('/api/dashboard/stats', auth, (req, res) => {
             .sort((a, b) => b.revenue - a.revenue)
             .slice(0, 5)
             .map(s => ({ ...s, name: users.find(u => u.id === s.id)?.fullName || 'Inconnu' }));
-        
+
         res.json({
             dailySales,
             yesterdaySales,
@@ -884,16 +961,16 @@ app.get('/api/dashboard/advanced-stats', auth, (req, res) => {
         const sales = readJSON(path.join(userDir, 'sales.json'), []);
         const products = readJSON(path.join(userDir, 'products.json'), []);
         const expenses = readJSON(path.join(userDir, 'expenses.json'), []);
-        
+
         const shopSales = sales.filter(s => s.shopId === parseInt(shopId) && !s.cancelled);
         const shopProducts = products.filter(p => p.shopId === parseInt(shopId));
         const shopExpenses = expenses.filter(e => e.shopId === parseInt(shopId));
-        
+
         const totalSalesCount = shopSales.length;
         const totalRevenue = shopSales.reduce((sum, s) => sum + s.total, 0);
         const averageCart = totalSalesCount > 0 ? totalRevenue / totalSalesCount : 0;
         const conversionRate = Math.min(100, Math.round((totalSalesCount / (totalSalesCount + 10)) * 100));
-        
+
         const productProfit = {};
         shopSales.forEach(s => {
             const cost = shopProducts.find(p => p.id === s.productId)?.costPrice || s.unitPrice * 0.7;
@@ -909,18 +986,18 @@ app.get('/api/dashboard/advanced-stats', auth, (req, res) => {
                 mostProfitableProduct = { name: p?.name || 'Inconnu', profit };
             }
         });
-        
+
         const monthlySales = {};
         shopSales.forEach(s => {
             const month = new Date(s.date).toLocaleString('fr-FR', { month: 'long' });
             monthlySales[month] = (monthlySales[month] || 0) + s.total;
         });
-        
+
         const monthlyTarget = 1000000;
         const currentMonthRevenue = shopSales.filter(s => new Date(s.date).getMonth() === new Date().getMonth())
             .reduce((sum, s) => sum + s.total, 0);
         const targetProgress = Math.min(100, Math.round((currentMonthRevenue / monthlyTarget) * 100));
-        
+
         res.json({
             averageCart,
             conversionRate,
@@ -941,7 +1018,7 @@ app.get('/api/dashboard/payment-stats', auth, (req, res) => {
         const userDir = getUserDataDir(req.userId);
         const sales = readJSON(path.join(userDir, 'sales.json'), []);
         const shopSales = sales.filter(s => s.shopId === parseInt(shopId) && !s.cancelled);
-        
+
         const paymentStats = {};
         shopSales.forEach(s => {
             const method = s.paymentMethod || 'cash';
@@ -962,13 +1039,13 @@ app.post('/api/ai/ask', auth, (req, res) => {
         const sales = readJSON(path.join(userDir, 'sales.json'), []);
         const products = readJSON(path.join(userDir, 'products.json'), []);
         const expenses = readJSON(path.join(userDir, 'expenses.json'), []);
-        
+
         const shopSales = sales.filter(s => s.shopId === shopId && !s.cancelled);
         const shopProducts = products.filter(p => p.shopId === shopId);
         const shopExpenses = expenses.filter(e => e.shopId === shopId);
-        
+
         let answer = '';
-        
+
         if ((lower.includes('aujourd') || lower.includes('jour')) && (lower.includes('vente') || lower.includes('vendu'))) {
             const today = new Date();
             today.setHours(0, 0, 0, 0);
@@ -1030,7 +1107,7 @@ app.post('/api/ai/ask', auth, (req, res) => {
         } else {
             answer = "Je reponds aux questions sur : Ventes (aujourd'hui, hier), Produit plus vendu, Meilleur vendeur, Stock, Depenses, Benefice, Prediction. Ex: 'Combien de ventes aujourd'hui ?'";
         }
-        
+
         res.json({ answer });
     } catch (err) {
         console.error('Erreur IA:', err);
