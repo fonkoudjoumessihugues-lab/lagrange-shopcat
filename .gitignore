@@ -5,3 +5,4 @@ user-data/
 *.log
 .DS_Store
 *.tmp
+railway-*.json
